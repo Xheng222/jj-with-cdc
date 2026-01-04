@@ -56,6 +56,7 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt as _;
+use tracing::debug;
 use tracing::instrument;
 use tracing::trace_span;
 
@@ -1905,6 +1906,7 @@ impl FileSnapshotter<'_> {
             message: format!("Failed to open file {}", disk_path.display()),
             err: err.into(),
         })?;
+        debug!("Converting EOL for file {}", disk_path.display());
         let mut contents = self
             .tree_state
             .target_eol_strategy

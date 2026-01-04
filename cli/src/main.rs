@@ -15,5 +15,6 @@
 use jj_cli::cli_util::CliRunner;
 
 fn main() -> std::process::ExitCode {
+    unsafe { std::env::set_var("JJ_LOG", "debug") };
     CliRunner::init().version(env!("JJ_VERSION")).run().into()
 }
