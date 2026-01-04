@@ -55,7 +55,7 @@ wrapping = "anywhere"
 show-ruler = true
 
 [snapshot]
-max-new-file-size = "1MiB"
+max-new-file-size = "1024MiB"
 auto-track = "all()"
 auto-update-stale = false
 

@@ -1,16 +1,17 @@
 #![expect(missing_docs)]
 
-use std::{path::Path, pin::Pin, sync::Arc, time::SystemTime};
+use std::{fs::File, path::Path, pin::Pin, time::SystemTime};
 
 use futures::stream::BoxStream;
-use tokio::io::AsyncRead;
+use tokio::{io::AsyncRead, sync::Mutex};
 use tracing::debug;
 
 use crate::{
     backend::{Backend, BackendResult, ChangeId, Commit, CommitId, CopyHistory, CopyId, CopyRecord, FileId, SigningFn, SymlinkId, Tree, TreeId}, 
-    git_backend::{GitBackend, GitBackendLoadError}, 
-    index::Index, repo_path::{RepoPath, RepoPathBuf},
-    settings::UserSettings
+    cdc::{cdc_magager::CdcMagager, pointer::CdcPointer}, git_backend::{GitBackend, GitBackendLoadError}, 
+    index::Index, 
+    repo_path::{RepoPath, RepoPathBuf}, 
+    settings::UserSettings, working_copy::CheckoutError
 };
 
 
@@ -19,14 +20,11 @@ use crate::{
 pub struct CdcBackendWrapper {
     /// The underlying backend 
     inner: GitBackend,
+    /// The CDC manager
+    cdc_manager: Mutex<CdcMagager>,
 }
 
 impl CdcBackendWrapper {
-    /// Creates a new CDC backend wrapper
-    pub fn new(inner: GitBackend) -> Self {
-        Self { inner }
-    }
-
     pub fn name() -> &'static str {
         "git"
     }
@@ -37,21 +35,53 @@ impl CdcBackendWrapper {
     ) -> Result<Self, Box<GitBackendLoadError>> {
         let inner = GitBackend::load(settings, store_path)?;
         debug!("store_path: {}", store_path.display());
-        Ok(Self { inner })
+        Ok(Self { inner, cdc_manager: Mutex::new(CdcMagager::new(store_path.to_path_buf().join("cdc"))) })
+    }
+
+    pub fn inner(&self) -> &GitBackend {
+        &self.inner
+    }
+
+    pub async fn write_file_to_cdc(&self, file: &mut File) -> Vec<u8> {
+        let mut cdc_manager = self.cdc_manager.lock().await;
+        match cdc_manager.write_file_to_cdc(file) {
+            Ok(pointer_content) => pointer_content,
+            Err(e) => {
+                debug!("Failed to write file to CDC: {:?}", e);
+                return Vec::new();
+            }
+        }
+    }
+
+    pub async fn read_file_from_cdc(&self, pointer_content: &CdcPointer, file: &mut File) -> Result<usize, CheckoutError> {
+        let mut cdc_manager = self.cdc_manager.lock().await;
+        match cdc_manager.read_file_from_cdc(pointer_content, file) {
+            Ok(size) => Ok(size),
+            Err(e) => {
+                debug!("Failed to read file from CDC: {:?}", e);
+                return Err(CheckoutError::Other {
+                    message: format!("Failed to read file from CDC: {:?}", e),
+                    err: Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+                });
+            }
+        }
     }
 }
 
 impl Backend for CdcBackendWrapper {
-    fn read_file<'life0,'life1,'life2,'async_trait>(&'life0 self,path: &'life1 RepoPath,id: &'life2 FileId,) -> ::core::pin::Pin<Box<dyn ::core::future::Future<Output = BackendResult<Pin<Box<dyn AsyncRead+Send> > > > + ::core::marker::Send+'async_trait> >where 'life0:'async_trait,'life1:'async_trait,'life2:'async_trait,Self:'async_trait {
+    fn read_file<'life0,'life1,'life2,'async_trait>(&'life0 self,path: &'life1 RepoPath,id: &'life2 FileId,) -> ::core::pin::Pin<Box<dyn ::core::future::Future<Output = BackendResult<Pin<Box<dyn AsyncRead+Send> > > > + ::core::marker::Send+'async_trait> >
+        where 'life0:'async_trait,'life1:'async_trait,'life2:'async_trait,Self:'async_trait 
+    {
         debug!("CDC Backend Wrapper: Reading file {}", path.as_internal_file_string());
         self.inner.read_file(path, id)
         // TODO: Implement CDC read file
     }
 
-    fn write_file<'life0,'life1,'life2,'async_trait>(&'life0 self,path: &'life1 RepoPath,contents: &'life2 mut (dyn AsyncRead+Send+Unpin),) ->  ::core::pin::Pin<Box<dyn ::core::future::Future<Output = BackendResult<FileId> > + ::core::marker::Send+'async_trait> >where 'life0:'async_trait,'life1:'async_trait,'life2:'async_trait,Self:'async_trait {
+    fn write_file<'life0,'life1,'life2,'async_trait>(&'life0 self,path: &'life1 RepoPath,contents: &'life2 mut (dyn AsyncRead+Send+Unpin),) ->  ::core::pin::Pin<Box<dyn ::core::future::Future<Output = BackendResult<FileId> > + ::core::marker::Send+'async_trait> >
+        where 'life0:'async_trait,'life1:'async_trait,'life2:'async_trait,Self:'async_trait 
+    {
         debug!("CDC Backend Wrapper: Writing file {}", path.as_internal_file_string());
         self.inner.write_file(path, contents)
-        // TODO: Implement CDC write file
     }
 
     fn name(&self) ->  &str {

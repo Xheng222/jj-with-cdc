@@ -34,6 +34,7 @@ version_check = { workspace = true }
 
 [dependencies]
 async-trait = { workspace = true }
+bitcode = "0.6.9"
 blake2 = { workspace = true }
 bstr = { workspace = true }
 chrono = { workspace = true }
@@ -52,6 +53,7 @@ interim = { workspace = true }
 itertools = { workspace = true }
 jj-lib-proc-macros = { workspace = true }
 maplit = { workspace = true }
+memmap2 = "0.9.9"
 once_cell = { workspace = true }
 pest = { workspace = true }
 pest_derive = { workspace = true }
@@ -60,6 +62,7 @@ prost = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 rayon = { workspace = true }
+redb = "3.1.0"
 ref-cast = { workspace = true }
 regex = { workspace = true }
 same-file = { workspace = true }
