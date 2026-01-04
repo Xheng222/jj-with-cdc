@@ -1,5 +1,8 @@
 <div class="title-block" style="text-align: center;" align="center">
 
+This fork of Jujutsu add CDC support to large binary files.
+
+
 # Jujutsu—a version control system
 
 <p><img title="jj logo" src="docs/images/jj-logo.svg" width="320" height="320"></p>
