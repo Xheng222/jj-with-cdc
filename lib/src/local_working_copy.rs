@@ -973,6 +973,9 @@ pub struct TreeState {
     exec_policy: ExecChangePolicy,
     fsmonitor_settings: FsmonitorSettings,
     target_eol_strategy: TargetEolStrategy,
+
+    /// CDC manager
+    cdc_magager: crate::cdc::cdc_magager::CdcMagager,
 }
 
 #[derive(Debug, Error)]
@@ -1050,6 +1053,7 @@ impl TreeState {
             exec_policy,
             fsmonitor_settings: fsmonitor_settings.clone(),
             target_eol_strategy: TargetEolStrategy::new(eol_conversion_mode),
+            cdc_magager: crate::cdc::cdc_magager::CdcMagager::default(),
         }
     }
 
@@ -1902,12 +1906,17 @@ impl FileSnapshotter<'_> {
         path: &RepoPath,
         disk_path: &Path,
     ) -> Result<FileId, SnapshotError> {
-        let file = File::open(disk_path).map_err(|err| SnapshotError::Other {
+        let mut file = File::open(disk_path).map_err(|err| SnapshotError::Other {
             message: format!("Failed to open file {}", disk_path.display()),
             err: err.into(),
         })?;
-        debug!("Converting EOL for file {}", disk_path.display());
-        let mut contents = self
+        
+        if self.tree_state.cdc_magager.is_binary_file(&mut file) {
+            let pointer_content = self.tree_state.cdc_magager.write_file_to_cdc(&mut file);
+            let mut cursor = std::io::Cursor:: new(pointer_content);
+            Ok(self.store().write_file(path, &mut cursor).await?)
+        } else {
+            let mut contents = self
             .tree_state
             .target_eol_strategy
             .convert_eol_for_snapshot(BlockingAsyncReader::new(file))
@@ -1916,7 +1925,11 @@ impl FileSnapshotter<'_> {
                 message: "Failed to convert the EOL".to_string(),
                 err: err.into(),
             })?;
-        Ok(self.store().write_file(path, &mut contents).await?)
+
+            Ok(self.store().write_file(path, &mut contents).await?)
+        }
+
+
     }
 
     async fn write_symlink_to_store(

@@ -41,6 +41,7 @@ clru = { workspace = true }
 digest = { workspace = true }
 dunce = { workspace = true }
 either = { workspace = true }
+fastcdc = "3.2.1"
 futures = { workspace = true }
 gix = { workspace = true, optional = true }
 globset = { workspace = true }
@@ -68,6 +69,7 @@ strsim = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+toml = { workspace = true }
 toml_edit = { workspace = true }
 tracing = { workspace = true }
 watchman_client = { workspace = true, optional = true }

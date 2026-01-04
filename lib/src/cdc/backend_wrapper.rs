@@ -36,6 +36,7 @@ impl CdcBackendWrapper {
         store_path: &Path,
     ) -> Result<Self, Box<GitBackendLoadError>> {
         let inner = GitBackend::load(settings, store_path)?;
+        debug!("store_path: {}", store_path.display());
         Ok(Self { inner })
     }
 }
