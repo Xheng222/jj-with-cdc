@@ -25,6 +25,8 @@
 // - https://github.com/rust-lang/rust/issues/54363
 extern crate self as jj_lib;
 
+pub mod cdc;
+
 #[macro_use]
 pub mod content_hash;
 
