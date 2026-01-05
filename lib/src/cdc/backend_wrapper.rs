@@ -72,15 +72,12 @@ impl Backend for CdcBackendWrapper {
     fn read_file<'life0,'life1,'life2,'async_trait>(&'life0 self,path: &'life1 RepoPath,id: &'life2 FileId,) -> ::core::pin::Pin<Box<dyn ::core::future::Future<Output = BackendResult<Pin<Box<dyn AsyncRead+Send> > > > + ::core::marker::Send+'async_trait> >
         where 'life0:'async_trait,'life1:'async_trait,'life2:'async_trait,Self:'async_trait 
     {
-        debug!("CDC Backend Wrapper: Reading file {}", path.as_internal_file_string());
         self.inner.read_file(path, id)
-        // TODO: Implement CDC read file
     }
 
     fn write_file<'life0,'life1,'life2,'async_trait>(&'life0 self,path: &'life1 RepoPath,contents: &'life2 mut (dyn AsyncRead+Send+Unpin),) ->  ::core::pin::Pin<Box<dyn ::core::future::Future<Output = BackendResult<FileId> > + ::core::marker::Send+'async_trait> >
         where 'life0:'async_trait,'life1:'async_trait,'life2:'async_trait,Self:'async_trait 
     {
-        debug!("CDC Backend Wrapper: Writing file {}", path.as_internal_file_string());
         self.inner.write_file(path, contents)
     }
 
