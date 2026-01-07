@@ -25,6 +25,8 @@ const MAX_PACK_SIZE: u32 = 128 * 1024 * 1024; // 128MB
 const BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB
 const CHUNK_AVG_SIZE: u32 = 16 * 1024; // 16KB
 
+const HASH_LENGTH: usize = 20;
+
 // 路径
 const PACKS_DIR: &str = "objects";
 const MANIFEST_GIT_DIR: &str = "manifest.git";
@@ -33,9 +35,7 @@ const CHUNK_DB_PATH: &str = "chunk.redb";
 // const MANIFEST_DB_PATH: &str = "manifest.redb";
 
 // 数据表定义
-const TABLE_CHUNKS: TableDefinition<[u8; 32], &[u8]> = TableDefinition::new("chunks");
-// const TABLE_MANIFESTS: TableDefinition<[u8; 32], &[u8]> = TableDefinition::new("manifests");
-
+const TABLE_CHUNKS: TableDefinition<[u8; HASH_LENGTH], [u8; 10]> = TableDefinition::new("chunks");
 
 #[derive(Encode, Decode, Debug)]
 struct GlobalState {
@@ -77,12 +77,30 @@ struct ChunkLocation {
     len_idx: u16,     // 长度
 }
 
+impl ChunkLocation {
+    fn to_bytes(self) -> [u8; 10] {
+        let mut bytes = [0u8; 10];
+        bytes[0..4].copy_from_slice(&self.pack_id.to_be_bytes());
+        bytes[4..8].copy_from_slice(&self.offset.to_be_bytes());
+        bytes[8..10].copy_from_slice(&self.len_idx.to_be_bytes());
+        bytes
+    }
+
+    fn from_bytes(bytes: [u8; 10]) -> Self {
+        Self {
+            pack_id: u32::from_be_bytes(bytes[0..4].try_into().unwrap()),
+            offset: u32::from_be_bytes(bytes[4..8].try_into().unwrap()),
+            len_idx: u16::from_be_bytes(bytes[8..10].try_into().unwrap()),
+        }
+    }
+}
+
 /// 一个文件对应的所有块的 hash
-type CdcManifest = Vec<[u8; 32]>;
+type CdcManifest = Vec<[u8; HASH_LENGTH]>;
 
 // 内存中临时的 Chunk 数据包
 struct PendingCdcChunk<'a> {
-    hash: [u8; 32],
+    hash: [u8; HASH_LENGTH],
     data: &'a [u8],
 }
 
@@ -222,13 +240,13 @@ impl CdcMagager {
         &mut self,
         chunks: &Vec<(usize, usize)>,
         mmap: &[u8],
-        chunk_hashes: &mut Vec<[u8; 32]>,
+        chunk_hashes: &mut CdcManifest,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let pending_chunks: Vec<PendingCdcChunk> = chunks.par_iter()
             .map(|&(offset, length)| {
                 let hash = calculate_hash(&mmap[offset .. offset + length]);
                  PendingCdcChunk {
-                    hash: hash,
+                    hash: hash[0..HASH_LENGTH].try_into().unwrap(),
                     data: &mmap[offset .. offset + length],
                 }
             }).collect();
@@ -258,8 +276,10 @@ impl CdcMagager {
                     offset: global_state.current_size,
                     len_idx: (chunk.data.len() - 1) as u16,
                 };
-                let loc_bytes = bitcode::encode(&loc);
-                chunk_table.insert(&chunk.hash, loc_bytes.as_slice())?;
+                
+                // let loc_bytes = bitcode::encode(&loc);
+                let loc_bytes = loc.to_bytes();
+                chunk_table.insert(chunk.hash, loc_bytes)?;
 
                 // 更新内存中的 State 计数
                 global_state.current_size += chunk.data.len() as u32;
@@ -279,7 +299,7 @@ impl CdcMagager {
 
     fn store_manifest(&self, manifest: CdcManifest, manifest_hash: &str) -> Result<(), Box<dyn std::error::Error>> {
         let manifest_git = self.manifest_git.as_ref().unwrap();
-        let manifest_bytes = encode_manifest_raw_32(manifest);
+        let manifest_bytes = encode_manifest_raw(manifest);
         let blob_id = manifest_git.write_blob(manifest_bytes)?;
         let refname = format!("refs/manifests/{}", manifest_hash);
         let _r = manifest_git
@@ -297,7 +317,7 @@ impl CdcMagager {
         let refname = format!("refs/manifests/{}", manifest_hash);
         let manifest_ref = manifest_git.find_reference(&refname)?;
         let blob = manifest_git.find_blob(manifest_ref.id())?;
-        let manifest = decode_manifest_raw_32(&blob.data);
+        let manifest = decode_manifest_raw(&blob.data);
         Ok(manifest)
     }
 
@@ -402,7 +422,8 @@ impl CdcMagager {
                 None => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("缺少块数据，Hash: {:?}", hash)))),
             };
 
-            let location: ChunkLocation = bitcode::decode(table_bytes.value())?;
+            // let location: ChunkLocation = bitcode::decode(table_bytes.value())?;
+            let location = ChunkLocation::from_bytes(table_bytes.value());
             file_cache.entry(location.pack_id).or_insert_with(|| {
                 let path = pack_dir.join(&location.pack_id.to_string());
                 File::open(path).unwrap()
@@ -444,18 +465,18 @@ impl CdcMagager {
 
 }
 
-fn encode_manifest_raw_32(chunk_hashes: CdcManifest) -> Vec<u8> {
-    let mut out = Vec::with_capacity(chunk_hashes.len() * 32);
+fn encode_manifest_raw(chunk_hashes: CdcManifest) -> Vec<u8> {
+    let mut out = Vec::with_capacity(chunk_hashes.len() * HASH_LENGTH);
     for h in chunk_hashes {
         out.extend(h);
     }
     out
 }
 
-fn decode_manifest_raw_32(bytes: &[u8]) -> CdcManifest {
-    let mut out = Vec::with_capacity(bytes.len() / 32);
-    for chunk in bytes.chunks_exact(32) {
-        let mut h = [0u8; 32];
+fn decode_manifest_raw(bytes: &[u8]) -> CdcManifest {
+    let mut out = Vec::with_capacity(bytes.len() / HASH_LENGTH);
+    for chunk in bytes.chunks_exact(HASH_LENGTH) {
+        let mut h = [0u8; HASH_LENGTH];
         h.copy_from_slice(chunk);
         out.push(h);
     }

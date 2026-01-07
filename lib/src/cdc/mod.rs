@@ -8,8 +8,7 @@ pub mod backend_wrapper;
 /// CDC config module
 pub mod cdc_magager;
 
-/// 
+/// Manifest module
 pub mod pointer;
 
-
-
+mod index_manager;
