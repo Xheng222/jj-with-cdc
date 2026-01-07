@@ -98,7 +98,21 @@ fn test_git_init_internal() {
 }
 
 #[test]
-fn test_git_init_internal_ignore_working_copy() {
+fn test_git_init_internal_preexisting_git_repo() {
+    let test_env = TestEnvironment::default();
+    test_env.work_dir("").create_dir_all("repo/.git");
+    let output = test_env.run_jj_in(".", ["git", "init", "repo"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Error: Did not create a jj repo because there is an existing Git repo in this directory.
+    Hint: To create a repo backed by the existing Git repo, run `jj git init --colocate` instead.
+    [EOF]
+    [exit status: 1]
+    ");
+}
+
+#[test]
+fn test_git_init_ignore_working_copy() {
     let test_env = TestEnvironment::default();
     let work_dir = test_env.work_dir("").create_dir("repo");
     work_dir.write_file("file1", "");
@@ -113,7 +127,7 @@ fn test_git_init_internal_ignore_working_copy() {
 }
 
 #[test]
-fn test_git_init_internal_at_operation() {
+fn test_git_init_at_operation() {
     let test_env = TestEnvironment::default();
     let work_dir = test_env.work_dir("").create_dir("repo");
 
@@ -293,6 +307,7 @@ fn test_git_init_external_import_trunk_upstream_takes_precedence() {
         "refs/remotes/origin/trunk",
     );
 
+    // also accepts full .git path
     let output = test_env.run_jj_in(
         ".",
         [
@@ -300,7 +315,7 @@ fn test_git_init_external_import_trunk_upstream_takes_precedence() {
             "init",
             "repo",
             "--git-repo",
-            git_repo_path.to_str().unwrap(),
+            git_repo_path.join(".git").to_str().unwrap(),
         ],
     );
     insta::allow_duplicates! {
@@ -325,52 +340,6 @@ fn test_git_init_external_import_trunk_upstream_takes_precedence() {
         [EOF]
         "#);
     }
-}
-
-#[test]
-fn test_git_init_external_ignore_working_copy() {
-    let test_env = TestEnvironment::default();
-    let git_repo_path = test_env.env_root().join("git-repo");
-    init_git_repo(&git_repo_path, false);
-    let work_dir = test_env.work_dir("").create_dir("repo");
-    work_dir.write_file("file1", "");
-
-    // No snapshot should be taken
-    let output = work_dir.run_jj([
-        "git",
-        "init",
-        "--ignore-working-copy",
-        "--git-repo",
-        git_repo_path.to_str().unwrap(),
-    ]);
-    insta::assert_snapshot!(output, @r"
-    ------- stderr -------
-    Error: --ignore-working-copy is not respected
-    [EOF]
-    [exit status: 2]
-    ");
-}
-
-#[test]
-fn test_git_init_external_at_operation() {
-    let test_env = TestEnvironment::default();
-    let git_repo_path = test_env.env_root().join("git-repo");
-    init_git_repo(&git_repo_path, false);
-    let work_dir = test_env.work_dir("").create_dir("repo");
-
-    let output = work_dir.run_jj([
-        "git",
-        "init",
-        "--at-op=@-",
-        "--git-repo",
-        git_repo_path.to_str().unwrap(),
-    ]);
-    insta::assert_snapshot!(output, @r"
-    ------- stderr -------
-    Error: --at-op is not respected
-    [EOF]
-    [exit status: 2]
-    ");
 }
 
 #[test]
@@ -844,37 +813,6 @@ fn test_git_init_colocated_dirty_working_copy() {
         },
     ]
     "#);
-}
-
-#[test]
-fn test_git_init_colocated_ignore_working_copy() {
-    let test_env = TestEnvironment::default();
-    let work_dir = test_env.work_dir("repo");
-    init_git_repo(work_dir.root(), false);
-    work_dir.write_file("file1", "");
-
-    let output = work_dir.run_jj(["git", "init", "--ignore-working-copy", "--colocate"]);
-    insta::assert_snapshot!(output, @r"
-    ------- stderr -------
-    Error: --ignore-working-copy is not respected
-    [EOF]
-    [exit status: 2]
-    ");
-}
-
-#[test]
-fn test_git_init_colocated_at_operation() {
-    let test_env = TestEnvironment::default();
-    let work_dir = test_env.work_dir("repo");
-    init_git_repo(work_dir.root(), false);
-
-    let output = work_dir.run_jj(["git", "init", "--at-op=@-", "--colocate"]);
-    insta::assert_snapshot!(output, @r"
-    ------- stderr -------
-    Error: --at-op is not respected
-    [EOF]
-    [exit status: 2]
-    ");
 }
 
 #[test]

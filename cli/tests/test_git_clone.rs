@@ -205,6 +205,41 @@ fn test_git_clone_bad_source() {
 }
 
 #[test]
+fn test_git_clone_choose_dest_path() {
+    let test_env = TestEnvironment::default();
+    let root_dir = test_env.work_dir("");
+    let git_repo_path = test_env.env_root().join("source.git");
+    git::init(git_repo_path);
+
+    // Windows drive letters prevent this case from triggering
+    if cfg!(unix) {
+        let output = root_dir.run_jj(["git", "clone", "/"]);
+        insta::assert_snapshot!(output, @"
+        ------- stderr -------
+        Error: No destination specified and wasn't able to guess it
+        [EOF]
+        [exit status: 1]
+        ");
+
+        let output = root_dir.run_jj(["git", "clone", "/.git"]);
+        insta::assert_snapshot!(output, @"
+        ------- stderr -------
+        Error: No destination specified and wasn't able to guess it
+        [EOF]
+        [exit status: 1]
+        ");
+    }
+
+    let output = root_dir.run_jj(["git", "clone", "source.git"]);
+    insta::assert_snapshot!(output, @r#"
+    ------- stderr -------
+    Fetching into new repo in "$TEST_ENV/source"
+    Nothing changed.
+    [EOF]
+    "#);
+}
+
+#[test]
 fn test_git_clone_colocate() {
     let test_env = TestEnvironment::default();
     let root_dir = test_env.work_dir("");
@@ -1308,6 +1343,26 @@ fn test_git_clone_branch() {
     Nothing changed.
     [EOF]
     ");
+
+    // Clone all branches individually, first exact match becomes wc parent
+    let output = root_dir.run_jj([
+        "git",
+        "clone",
+        "source",
+        "clone_each",
+        "--branch=feature1",
+        "--branch=main",
+    ]);
+    insta::assert_snapshot!(output, @r#"
+    ------- stderr -------
+    Fetching into new repo in "$TEST_ENV/clone_each"
+    bookmark: feature1@origin [new] tracked
+    bookmark: main@origin     [new] tracked
+    Working copy  (@) now at: nuwvvtmy 38b11a7f (empty) (no description set)
+    Parent commit (@-)      : yxwyzxtq 14835edf feature1 | feature1 message
+    Added 1 files, modified 0 files, removed 0 files
+    [EOF]
+    "#);
 }
 
 #[test]
