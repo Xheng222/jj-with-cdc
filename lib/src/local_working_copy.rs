@@ -1899,7 +1899,6 @@ impl FileSnapshotter<'_> {
         }
     }
 
-
     async fn write_file_to_store(
         &self,
         path: &RepoPath,
@@ -1911,8 +1910,11 @@ impl FileSnapshotter<'_> {
         })?;
         
         if let Some(cdc_backend_wrapper) = self.store().backend_impl::<crate::cdc::backend_wrapper::CdcBackendWrapper>() && 
-                crate::cdc::cdc_magager::CdcMagager::is_binary_file(&mut file) {
+                crate::cdc::cdc_manager::CdcMagager::is_binary_file(&mut file) {
+                let start_time = std::time::Instant::now();
                 let pointer_content = cdc_backend_wrapper.write_file_to_cdc(&mut file).await;
+                let end_time = std::time::Instant::now();
+                tracing::debug!("write file {:?} time: {:?}", disk_path.display(), end_time.duration_since(start_time));
                 Ok(self.store().write_file(path, &mut std::io::Cursor::new(pointer_content)).await?)
         } else {
             let mut contents = self
@@ -1998,11 +2000,15 @@ impl TreeState {
         let size = if let Some(cdc_wrapper) = self.store.backend_impl::<crate::cdc::backend_wrapper::CdcBackendWrapper>() {
             match CdcPointer::try_parse(&mut contents).await {
                 Ok(TryParseResult::Parsed(pointer)) => {
-                    cdc_wrapper.read_file_from_cdc(&pointer, &mut file).await
+                    let start_time = std::time::Instant::now();
+                    let size = cdc_wrapper.read_file_from_cdc(&pointer, &mut file).await
                         .map_err(|err| CheckoutError::Other {
                             message: format!("Failed to read file from CDC: {:?}", err),
                             err: err.into(),
-                        })?
+                        })?;
+                    let end_time = std::time::Instant::now();
+                    tracing::debug!("read file {:?} time: {:?}", disk_path.display(), end_time.duration_since(start_time));
+                    size
                 }
                 Ok(TryParseResult::NotCdcPointer(consumed_bytes)) => {
                     let consumed_bytes = std::io::Cursor::new(consumed_bytes);

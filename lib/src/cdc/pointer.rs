@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::debug;
 
+pub type CdcPointerBytes = Vec<u8>;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CdcPointer {
@@ -31,8 +32,8 @@ impl CdcPointer {
         &self.manifest_hash
     }
 
-    // 序列化 CDC 指针，返回 Vec<u8>
-    pub fn serialize(&self) -> Vec<u8> {
+    // 序列化 CDC 指针，返回 CdcPointerBytes
+    pub fn serialize(self) -> CdcPointerBytes {
         let mut buf = Vec::new();
         buf.extend_from_slice(Self::MAGIC);
         buf.extend_from_slice(self.manifest_hash.as_bytes());

@@ -3,12 +3,12 @@
 use std::{fs::File, path::Path, pin::Pin, time::SystemTime};
 
 use futures::stream::BoxStream;
-use tokio::{io::AsyncRead, sync::Mutex};
+use tokio::{io::AsyncRead};
 use tracing::debug;
 
 use crate::{
     backend::{Backend, BackendResult, ChangeId, Commit, CommitId, CopyHistory, CopyId, CopyRecord, FileId, SigningFn, SymlinkId, Tree, TreeId}, 
-    cdc::{cdc_magager::CdcMagager, pointer::CdcPointer}, git_backend::{GitBackend, GitBackendLoadError}, 
+    cdc::{cdc_manager::CdcMagager, pointer::CdcPointer}, git_backend::{GitBackend, GitBackendLoadError}, 
     index::Index, 
     repo_path::{RepoPath, RepoPathBuf}, 
     settings::UserSettings, working_copy::CheckoutError
@@ -16,12 +16,11 @@ use crate::{
 
 
 /// CDC backend wrapper
-#[derive(Debug)]
 pub struct CdcBackendWrapper {
     /// The underlying backend 
     inner: GitBackend,
     /// The CDC manager
-    cdc_manager: Mutex<CdcMagager>,
+    cdc_manager: tokio::sync::Mutex<CdcMagager>,
 }
 
 impl CdcBackendWrapper {
@@ -35,7 +34,7 @@ impl CdcBackendWrapper {
     ) -> Result<Self, Box<GitBackendLoadError>> {
         let inner = GitBackend::load(settings, store_path)?;
         debug!("store_path: {}", store_path.display());
-        Ok(Self { inner, cdc_manager: Mutex::new(CdcMagager::new(store_path.to_path_buf().join("cdc"))) })
+        Ok(Self { inner, cdc_manager: tokio::sync::Mutex::new(CdcMagager::new(store_path.to_path_buf().join("cdc"))) })
     }
 
     pub fn inner(&self) -> &GitBackend {
@@ -155,4 +154,13 @@ impl Backend for CdcBackendWrapper {
         self.inner.gc(index, keep_newer)
     }
 }
+
+impl std::fmt::Debug for CdcBackendWrapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CdcBackendWrapper")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
 

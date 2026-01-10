@@ -358,16 +358,16 @@ pub struct UnexpectedGitBackendError;
 /// Returns the underlying `GitBackend` implementation.
 pub fn get_git_backend(store: &Store) -> Result<&GitBackend, UnexpectedGitBackendError> {
     // store.backend_impl().ok_or(UnexpectedGitBackendError)
-    // 先尝试直接获取 GitBackend
-    if let Some(backend) = store.backend_impl::<GitBackend>() {
-        return Ok(backend);
-    }
-    
-    // 如果失败，尝试获取 CdcBackendWrapper 并返回其内部的 GitBackend
+    // 尝试获取 CdcBackendWrapper 并返回其内部的 GitBackend
     if let Some(wrapper) = store.backend_impl::<crate::cdc::backend_wrapper::CdcBackendWrapper>() {
         return Ok(wrapper.inner());
     }
-    
+
+    // 直接获取 GitBackend
+    if let Some(backend) = store.backend_impl::<GitBackend>() {
+        return Ok(backend);
+    }
+
     Err(UnexpectedGitBackendError)
 }
 
