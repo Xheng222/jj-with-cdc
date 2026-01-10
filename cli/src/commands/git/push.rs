@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::error;
 use std::fmt;
 use std::io;
 use std::io::Write as _;
@@ -117,6 +118,9 @@ pub struct GitPushArgs {
 
     /// Push only this bookmark, or bookmarks matching a pattern (can be
     /// repeated)
+    ///
+    /// If a bookmark isn't tracking anything yet, the remote bookmark will be
+    /// tracked automatically.
     ///
     /// By default, the specified pattern matches bookmark names with glob
     /// syntax. You can also use other [string pattern syntax].
@@ -355,6 +359,10 @@ pub fn cmd_git_push(
                 continue;
             }
             let remote_symbol = name.to_remote_symbol(remote);
+            // Override allow_new if the bookmark is not tracked with any remote
+            // already. The user has specified --bookmark, so their intent which
+            // bookmarks to push is clear.
+            let allow_new = allow_new || !has_tracked_remote_bookmarks(tx.repo(), name);
             let allow_delete = true; // named explicitly, allow delete without --delete
             match classify_bookmark_update(remote_symbol, targets, allow_new, allow_delete) {
                 Ok(Some(update)) => bookmark_updates.push((name.to_owned(), update)),
@@ -470,7 +478,7 @@ pub fn cmd_git_push(
     print_stats(ui, &push_stats)?;
     // TODO: On partial success, locally-created --change/--named bookmarks will
     // be committed. It's probably better to remove failed local bookmarks.
-    if push_stats.all_ok() || !push_stats.pushed.is_empty() {
+    if push_stats.all_ok() || push_stats.some_exported() {
         tx.finish(ui, tx_description)?;
     }
     if push_stats.all_ok() {
@@ -521,6 +529,21 @@ fn print_stats(ui: &Ui, stats: &GitPushStats) -> io::Result<()> {
             ui.hint_default(),
             "Try checking if you have permission to push to all the bookmarks."
         )?;
+    }
+    if !stats.unexported_bookmarks.is_empty() {
+        writeln!(
+            ui.warning_default(),
+            "The following bookmarks couldn't be updated locally:"
+        )?;
+        let mut formatter = ui.stderr_formatter();
+        for (symbol, reason) in &stats.unexported_bookmarks {
+            write!(formatter, "  ")?;
+            write!(formatter.labeled("bookmark"), "{symbol}")?;
+            for err in iter::successors(Some(reason as &dyn error::Error), |err| err.source()) {
+                write!(formatter, ": {err}")?;
+            }
+            writeln!(formatter)?;
+        }
     }
     Ok(())
 }

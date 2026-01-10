@@ -39,7 +39,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::mpsc::Sender;
 use std::sync::mpsc::channel;
-use std::time::UNIX_EPOCH;
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use either::Either;
@@ -103,8 +103,8 @@ use crate::merge::MergeBuilder;
 use crate::merge::MergedTreeValue;
 use crate::merge::SameChange;
 use crate::merged_tree::MergedTree;
-use crate::merged_tree::MergedTreeBuilder;
 use crate::merged_tree::TreeDiffEntry;
+use crate::merged_tree_builder::MergedTreeBuilder;
 use crate::object_id::ObjectId as _;
 use crate::op_store::OperationId;
 use crate::ref_name::WorkspaceName;
@@ -321,25 +321,29 @@ impl FileState {
         }
     }
 
-    fn for_file(exec_bit: ExecBit, size: u64, metadata: &Metadata) -> Self {
-        Self {
+    fn for_file(
+        exec_bit: ExecBit,
+        size: u64,
+        metadata: &Metadata,
+    ) -> Result<Self, MtimeOutOfRange> {
+        Ok(Self {
             file_type: FileType::Normal { exec_bit },
-            mtime: mtime_from_metadata(metadata),
+            mtime: mtime_from_metadata(metadata)?,
             size,
             materialized_conflict_data: None,
-        }
+        })
     }
 
-    fn for_symlink(metadata: &Metadata) -> Self {
+    fn for_symlink(metadata: &Metadata) -> Result<Self, MtimeOutOfRange> {
         // When using fscrypt, the reported size is not the content size. So if
         // we were to record the content size here (like we do for regular files), we
         // would end up thinking the file has changed every time we snapshot.
-        Self {
+        Ok(Self {
             file_type: FileType::Symlink,
-            mtime: mtime_from_metadata(metadata),
+            mtime: mtime_from_metadata(metadata)?,
             size: metadata.len(),
             materialized_conflict_data: None,
-        }
+        })
     }
 
     fn for_gitsubmodule() -> Self {
@@ -883,22 +887,27 @@ fn reject_reserved_existing_file_identity(
     Ok(())
 }
 
-fn mtime_from_metadata(metadata: &Metadata) -> MillisSinceEpoch {
+#[derive(Debug, Error)]
+#[error("Out-of-range file modification time")]
+struct MtimeOutOfRange;
+
+fn mtime_from_metadata(metadata: &Metadata) -> Result<MillisSinceEpoch, MtimeOutOfRange> {
     let time = metadata
         .modified()
         .expect("File mtime not supported on this platform?");
-    let since_epoch = time
-        .duration_since(UNIX_EPOCH)
-        .expect("mtime before unix epoch");
+    system_time_to_millis(time).ok_or(MtimeOutOfRange)
+}
 
-    MillisSinceEpoch(
-        i64::try_from(since_epoch.as_millis())
-            .expect("mtime billions of years into the future or past"),
-    )
+fn system_time_to_millis(time: SystemTime) -> Option<MillisSinceEpoch> {
+    let millis = match time.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(duration) => i64::try_from(duration.as_millis()).ok()?,
+        Err(err) => -i64::try_from(err.duration().as_millis()).ok()?,
+    };
+    Some(MillisSinceEpoch(millis))
 }
 
 /// Create a new [`FileState`] from metadata.
-fn file_state(metadata: &Metadata) -> Option<FileState> {
+fn file_state(metadata: &Metadata) -> Result<Option<FileState>, MtimeOutOfRange> {
     let metadata_file_type = metadata.file_type();
     let file_type = if metadata_file_type.is_dir() {
         None
@@ -910,16 +919,16 @@ fn file_state(metadata: &Metadata) -> Option<FileState> {
     } else {
         None
     };
-    file_type.map(|file_type| {
-        let mtime = mtime_from_metadata(metadata);
-        let size = metadata.len();
-        FileState {
+    if let Some(file_type) = file_type {
+        Ok(Some(FileState {
             file_type,
-            mtime,
-            size,
+            mtime: mtime_from_metadata(metadata)?,
+            size: metadata.len(),
             materialized_conflict_data: None,
-        }
-    })
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 struct FsmonitorMatcher {
@@ -1081,8 +1090,10 @@ impl TreeState {
     }
 
     fn update_own_mtime(&mut self) {
-        if let Ok(metadata) = self.state_path.join("tree_state").symlink_metadata() {
-            self.own_mtime = mtime_from_metadata(&metadata);
+        if let Ok(metadata) = self.state_path.join("tree_state").symlink_metadata()
+            && let Ok(mtime) = mtime_from_metadata(&metadata)
+        {
+            self.own_mtime = mtime;
         } else {
             self.own_mtime = MillisSinceEpoch(0);
         }
@@ -1612,7 +1623,9 @@ impl FileSnapshotter<'_> {
                     };
                     self.untracked_paths_tx.send((path, reason)).ok();
                     Ok(None)
-                } else if let Some(new_file_state) = file_state(&metadata) {
+                } else if let Some(new_file_state) = file_state(&metadata)
+                    .map_err(|err| snapshot_error_for_mtime_out_of_range(err, &entry.path()))?
+                {
                     self.process_present_file(
                         path,
                         &entry.path(),
@@ -1650,7 +1663,10 @@ impl FileSnapshotter<'_> {
                     });
                 }
             };
-            if let Some(new_file_state) = metadata.as_ref().and_then(file_state) {
+            if let Some(metadata) = &metadata
+                && let Some(new_file_state) = file_state(metadata)
+                    .map_err(|err| snapshot_error_for_mtime_out_of_range(err, &disk_path))?
+            {
                 self.process_present_file(
                     tracked_path.to_owned(),
                     &disk_path,
@@ -1950,6 +1966,13 @@ impl FileSnapshotter<'_> {
     }
 }
 
+fn snapshot_error_for_mtime_out_of_range(err: MtimeOutOfRange, path: &Path) -> SnapshotError {
+    SnapshotError::Other {
+        message: format!("Failed to process file metadata {}", path.display()),
+        err: err.into(),
+    }
+}
+
 /// Functions to update local-disk files from the store.
 impl TreeState {
     async fn write_file(
@@ -1996,7 +2019,8 @@ impl TreeState {
         let metadata = file
             .metadata()
             .map_err(|err| checkout_error_for_stat_error(err, disk_path))?;
-        Ok(FileState::for_file(exec_bit, size as u64, &metadata))
+        FileState::for_file(exec_bit, size as u64, &metadata)
+            .map_err(|err| checkout_error_for_mtime_out_of_range(err, disk_path))
     }
 
     fn write_symlink(&self, disk_path: &Path, target: String) -> Result<FileState, CheckoutError> {
@@ -2033,7 +2057,8 @@ impl TreeState {
         let metadata = disk_path
             .symlink_metadata()
             .map_err(|err| checkout_error_for_stat_error(err, disk_path))?;
-        Ok(FileState::for_symlink(&metadata))
+        FileState::for_symlink(&metadata)
+            .map_err(|err| checkout_error_for_mtime_out_of_range(err, disk_path))
     }
 
     async fn write_conflict(
@@ -2069,7 +2094,8 @@ impl TreeState {
         let metadata = file
             .metadata()
             .map_err(|err| checkout_error_for_stat_error(err, disk_path))?;
-        Ok(FileState::for_file(exec_bit, size, &metadata))
+        FileState::for_file(exec_bit, size, &metadata)
+            .map_err(|err| checkout_error_for_mtime_out_of_range(err, disk_path))
     }
 
     pub fn check_out(&mut self, new_tree: &MergedTree) -> Result<CheckoutStats, CheckoutError> {
@@ -2416,6 +2442,13 @@ impl TreeState {
 fn checkout_error_for_stat_error(err: io::Error, path: &Path) -> CheckoutError {
     CheckoutError::Other {
         message: format!("Failed to stat file {}", path.display()),
+        err: err.into(),
+    }
+}
+
+fn checkout_error_for_mtime_out_of_range(err: MtimeOutOfRange, path: &Path) -> CheckoutError {
+    CheckoutError::Other {
+        message: format!("Failed to process file metadata {}", path.display()),
         err: err.into(),
     }
 }
@@ -2819,6 +2852,8 @@ impl LockedLocalWorkingCopy {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use maplit::hashset;
 
     use super::*;
@@ -3005,5 +3040,33 @@ mod tests {
             prefixed_states.get_at(repo_path("b#"), repo_path_component("#")),
             None
         );
+    }
+
+    #[test]
+    fn test_system_time_to_millis() {
+        let epoch = SystemTime::UNIX_EPOCH;
+        assert_eq!(system_time_to_millis(epoch), Some(MillisSinceEpoch(0)));
+        if let Some(time) = epoch.checked_add(Duration::from_millis(1)) {
+            assert_eq!(system_time_to_millis(time), Some(MillisSinceEpoch(1)));
+        }
+        if let Some(time) = epoch.checked_sub(Duration::from_millis(1)) {
+            assert_eq!(system_time_to_millis(time), Some(MillisSinceEpoch(-1)));
+        }
+        if let Some(time) = epoch.checked_add(Duration::from_millis(i64::MAX as u64)) {
+            assert_eq!(
+                system_time_to_millis(time),
+                Some(MillisSinceEpoch(i64::MAX))
+            );
+        }
+        if let Some(time) = epoch.checked_sub(Duration::from_millis(i64::MAX as u64)) {
+            assert_eq!(
+                system_time_to_millis(time),
+                Some(MillisSinceEpoch(-i64::MAX))
+            );
+        }
+        if let Some(time) = epoch.checked_sub(Duration::from_millis(i64::MAX as u64 + 1)) {
+            // i64::MIN could be returned, but we don't care such old timestamp
+            assert_eq!(system_time_to_millis(time), None);
+        }
     }
 }

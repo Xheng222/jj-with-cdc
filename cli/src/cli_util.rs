@@ -153,6 +153,7 @@ use crate::command_error::config_error_with_message;
 use crate::command_error::handle_command_result;
 use crate::command_error::internal_error;
 use crate::command_error::internal_error_with_message;
+use crate::command_error::print_error_sources;
 use crate::command_error::print_parse_diagnostics;
 use crate::command_error::user_error;
 use crate::command_error::user_error_with_hint;
@@ -478,8 +479,30 @@ impl CommandHelper {
         let workspace = self.load_workspace()?;
         let op_head = self.resolve_operation(ui, workspace.repo_loader())?;
         let repo = workspace.repo_loader().load_at(&op_head)?;
-        let env = self.workspace_environment(ui, &workspace)?;
-        revset_util::warn_unresolvable_trunk(ui, repo.as_ref(), &env.revset_parse_context())?;
+        let mut env = self.workspace_environment(ui, &workspace)?;
+        if let Err(err) =
+            revset_util::try_resolve_trunk_alias(repo.as_ref(), &env.revset_parse_context())
+        {
+            // The fallback can be builtin_trunk() if we're willing to support
+            // inferred trunk forever. (#7990)
+            let fallback = "root()";
+            writeln!(
+                ui.warning_default(),
+                "Failed to resolve `revset-aliases.trunk()`: {err}"
+            )?;
+            writeln!(
+                ui.warning_no_heading(),
+                "The `trunk()` alias is temporarily set to `{fallback}`."
+            )?;
+            writeln!(
+                ui.hint_default(),
+                "Use `jj config edit --repo` to adjust the `trunk()` alias."
+            )?;
+            env.revset_aliases_map
+                .insert("trunk()", fallback)
+                .expect("valid syntax");
+            env.reload_revset_expressions(ui)?;
+        }
         WorkspaceCommandHelper::new(ui, workspace, repo, env, self.is_at_head_operation())
     }
 
@@ -813,8 +836,7 @@ impl WorkspaceCommandEnvironment {
             short_prefixes_expression: None,
             conflict_marker_style: settings.get("ui.conflict-marker-style")?,
         };
-        env.immutable_heads_expression = env.load_immutable_heads_expression(ui)?;
-        env.short_prefixes_expression = env.load_short_prefixes_expression(ui)?;
+        env.reload_revset_expressions(ui)?;
         Ok(env)
     }
 
@@ -858,6 +880,13 @@ impl WorkspaceCommandEnvironment {
             None => context,
             Some(expression) => context.disambiguate_within(expression.clone()),
         }
+    }
+
+    /// Updates parsed revset expressions.
+    fn reload_revset_expressions(&mut self, ui: &Ui) -> Result<(), CommandError> {
+        self.immutable_heads_expression = self.load_immutable_heads_expression(ui)?;
+        self.short_prefixes_expression = self.load_short_prefixes_expression(ui)?;
+        Ok(())
     }
 
     /// User-configured expression defining the immutable set.
@@ -2062,11 +2091,23 @@ to the current parents may contain changes from multiple commits.
         }
 
         for (name, wc_commit_id) in &tx.repo().view().wc_commit_ids().clone() {
-            if self
-                .env
-                .find_immutable_commit(tx.repo(), &RevsetExpression::commit(wc_commit_id.clone()))?
-                .is_some()
-            {
+            // This can fail if trunk() bookmark gets deleted or conflicted. If
+            // the unresolvable trunk() issue gets addressed differently, it
+            // should be okay to propagate the error.
+            let wc_expr = RevsetExpression::commit(wc_commit_id.clone());
+            let is_immutable = match self.env.find_immutable_commit(tx.repo(), &wc_expr) {
+                Ok(commit_id) => commit_id.is_some(),
+                Err(CommandError { error, .. }) => {
+                    writeln!(
+                        ui.warning_default(),
+                        "Failed to check mutability of the new working-copy revision."
+                    )?;
+                    print_error_sources(ui, Some(&error))?;
+                    // Give up because the same error would occur repeatedly.
+                    break;
+                }
+            };
+            if is_immutable {
                 let wc_commit = tx.repo().store().get_commit(wc_commit_id)?;
                 tx.repo_mut().check_out(name.clone(), &wc_commit)?;
                 writeln!(
@@ -2076,6 +2117,21 @@ to the current parents may contain changes from multiple commits.
                     name = name.as_symbol()
                 )?;
             }
+        }
+        if let Err(err) =
+            revset_util::try_resolve_trunk_alias(tx.repo(), &self.env.revset_parse_context())
+        {
+            // The warning would be printed above if working copies exist.
+            if tx.repo().view().wc_commit_ids().is_empty() {
+                writeln!(
+                    ui.warning_default(),
+                    "Failed to resolve `revset-aliases.trunk()`: {err}"
+                )?;
+            }
+            writeln!(
+                ui.hint_default(),
+                "Use `jj config edit --repo` to adjust the `trunk()` alias."
+            )?;
         }
 
         let old_repo = tx.base_repo().clone();
@@ -2106,7 +2162,7 @@ to the current parents may contain changes from multiple commits.
                     Ok(()) => {}
                     Err(err @ jj_lib::git::GitResetHeadError::UpdateHeadRef(_)) => {
                         writeln!(ui.warning_default(), "{err}")?;
-                        crate::command_error::print_error_sources(ui, err.source())?;
+                        print_error_sources(ui, err.source())?;
                     }
                     Err(err) => return Err(err.into()),
                 }
@@ -2269,7 +2325,6 @@ to the current parents may contain changes from multiple commits.
                     .collect(),
             )?;
         }
-        revset_util::warn_unresolvable_trunk(ui, new_repo, &self.env.revset_parse_context())?;
 
         Ok(())
     }
