@@ -4,14 +4,10 @@ use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::{PathBuf};
 
-use tracing::debug;
-
 use crate::cdc::cdc_config::{LARGE_FILE_THRESHOLD, MAX_BINARY_FILE_HEAD_SIZE};
+use crate::cdc::cdc_error::CdcResult;
 use crate::cdc::pointer::CdcPointer;
 use crate::cdc::store_backend::{ChunkStoreBackend, StoreBackend};
-
-
-
 
 /// CDC manager
 pub struct CdcMagager {
@@ -21,9 +17,11 @@ pub struct CdcMagager {
 
 impl CdcMagager {
     pub fn new(store_path: PathBuf) -> Self {
+
+
         Self { 
             store_path: store_path, 
-            store_backend: None
+            store_backend: None,
         }
     }
 
@@ -85,7 +83,7 @@ impl CdcMagager {
     
     }
 
-    fn init(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn init(&mut self) -> CdcResult<()> {
         if self.store_backend.is_some() {
             return Ok(());
         }
@@ -96,15 +94,19 @@ impl CdcMagager {
         }
     }
 
-    pub fn write_file_to_cdc(&mut self, file: &File) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    pub fn write_file_to_cdc(&mut self, file: File) -> CdcResult<Vec<u8>> {
         self.init()?;
-        let result = self.store_backend.as_mut().unwrap().write_file(file);
-        result
+        self.store_backend.as_ref().unwrap().write_file(file)
     }
 
-    pub fn read_file_from_cdc(&mut self, pointer: &CdcPointer, file: &File) -> Result<usize, Box<dyn std::error::Error>> {
+    pub fn read_file_from_cdc(&mut self, pointer: &CdcPointer, file: &File) -> CdcResult<usize> {
         self.init()?;
-        self.store_backend.as_mut().unwrap().load_file(pointer, file)
+        self.store_backend.as_ref().unwrap().load_file(pointer, file)
+    }
+
+    pub fn gc(&mut self, keep_manifests: Vec<CdcPointer>) -> CdcResult<()> {
+        self.init()?;
+        self.store_backend.as_ref().unwrap().gc(keep_manifests)
     }
 
 }

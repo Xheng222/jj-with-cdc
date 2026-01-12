@@ -2,7 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tracing::debug;
+
+use crate::cdc::{cdc_config::{MAGIC, MAGIC_LENGTH}, cdc_error::{CdcResult}};
 
 pub type CdcPointerBytes = Vec<u8>;
 
@@ -20,8 +21,6 @@ pub enum TryParseResult {
 }
 
 impl CdcPointer {
-    const MAGIC: &[u8] = b"\x00CDC\x00";  // 二进制魔数
-
     pub fn new(manifest_hash: String) -> Self {
         Self {
             manifest_hash,
@@ -35,7 +34,7 @@ impl CdcPointer {
     // 序列化 CDC 指针，返回 CdcPointerBytes
     pub fn serialize(self) -> CdcPointerBytes {
         let mut buf = Vec::new();
-        buf.extend_from_slice(Self::MAGIC);
+        buf.extend_from_slice(MAGIC);
         buf.extend_from_slice(self.manifest_hash.as_bytes());
         buf
     }
@@ -46,22 +45,13 @@ impl CdcPointer {
     /// - `Ok(TryParseResult::Parsed(pointer))` - 成功解析出 CDC 指针
     /// - `Ok(TryParseResult::NotCdcPointer(bytes))` - 不是 CDC 指针，返回已读取的字节
     /// - `Err(e)` - 是 CDC 指针但解析失败，或读取错误
-    pub async fn try_parse<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result<TryParseResult> 
+    pub async fn try_parse<R: AsyncRead + Unpin>(reader: &mut R) -> CdcResult<TryParseResult> 
     {
         // 尝试读取魔数
-        let mut magic_buf = [0; Self::MAGIC.len()];
-        match reader.read(&mut magic_buf).await {
-            Ok(n) => {
-                // 读取到的字节数不等于魔数，不是 CDC 指针
-                if magic_buf != Self::MAGIC {
-                    return Ok(TryParseResult::NotCdcPointer(magic_buf[..n].to_vec()));
-                }
-            }
-            Err(e) => {
-                // 真正的读取错误
-                debug!("Failed to read magic number: {}", e);
-                return Err(e);
-            }
+        let mut magic_buf = [0; MAGIC_LENGTH];
+        let n = reader.read(&mut magic_buf).await?;
+        if !Self::is_cdc_pointer(&magic_buf) {
+            return Ok(TryParseResult::NotCdcPointer(magic_buf[..n].to_vec()));
         }
 
         // 魔数匹配，这应该是一个 CDC 指针
@@ -69,18 +59,24 @@ impl CdcPointer {
         reader.read_to_end(&mut hash_bytes).await?;
         
         // 解析 hash
-        let hash = String::from_utf8(hash_bytes).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("CDC pointer contains invalid UTF-8 hash: {}", e)
-            )
-        })?;
+        let hash = String::from_utf8(hash_bytes).unwrap();
 
         Ok(TryParseResult::Parsed(Self::new(hash)))
     }
 
+    pub fn try_parse_from_bytes(bytes: &[u8]) -> Option<CdcPointer> {
+        if Self::is_cdc_pointer(bytes) {
+            let hash = String::from_utf8(bytes[MAGIC_LENGTH..].to_vec()).unwrap();
+            Some(Self::new(hash))
+        }
+        else {
+            None
+        }
+    }
+
+    #[inline]
     pub fn is_cdc_pointer(bytes: &[u8]) -> bool {
-        bytes.starts_with(Self::MAGIC)
+        bytes.starts_with(MAGIC)
     }
 
 

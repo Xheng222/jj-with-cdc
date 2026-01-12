@@ -2474,6 +2474,7 @@ dependencies = [
  "jj-lib-proc-macros",
  "maplit",
  "memmap2 0.9.9",
+ "mincdc",
  "nix 0.30.1",
  "num_cpus",
  "once_cell",
@@ -2761,6 +2762,12 @@ checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
 ]
+
+[[package]]
+name = "mincdc"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d2923e26fcf6c3699531d13e141a4c18bb0852d5614da154805dcf6348fbf21"
 
 [[package]]
 name = "minimal-lexical"

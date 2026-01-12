@@ -1,14 +1,15 @@
 #![expect(missing_docs)]
 
-use std::{fs::File, path::Path, pin::Pin, time::SystemTime};
+use std::{fs::File, path::{Path, PathBuf}, pin::Pin, time::SystemTime};
 
 use futures::stream::BoxStream;
+use gix::{objs::FindHeader, odb::HeaderExt};
 use tokio::{io::AsyncRead};
 use tracing::debug;
 
 use crate::{
-    backend::{Backend, BackendResult, ChangeId, Commit, CommitId, CopyHistory, CopyId, CopyRecord, FileId, SigningFn, SymlinkId, Tree, TreeId}, 
-    cdc::{cdc_manager::CdcMagager, pointer::CdcPointer}, git_backend::{GitBackend, GitBackendLoadError}, 
+    backend::{Backend, BackendError, BackendResult, ChangeId, Commit, CommitId, CopyHistory, CopyId, CopyRecord, FileId, SigningFn, SymlinkId, Tree, TreeId}, 
+    cdc::{cdc_config::CDC_POINTER_SIZE, cdc_error::CdcResult, cdc_manager::CdcMagager, pointer::{CdcPointer, TryParseResult}}, git_backend::{GitBackend, GitBackendLoadError}, 
     index::Index, 
     repo_path::{RepoPath, RepoPathBuf}, 
     settings::UserSettings, working_copy::CheckoutError
@@ -25,7 +26,7 @@ pub struct CdcBackendWrapper {
 
 impl CdcBackendWrapper {
     pub fn name() -> &'static str {
-        "git"
+        GitBackend::name()
     }
 
     pub fn load(
@@ -33,23 +34,24 @@ impl CdcBackendWrapper {
         store_path: &Path,
     ) -> Result<Self, Box<GitBackendLoadError>> {
         let inner = GitBackend::load(settings, store_path)?;
-        debug!("store_path: {}", store_path.display());
-        Ok(Self { inner, cdc_manager: tokio::sync::Mutex::new(CdcMagager::new(store_path.to_path_buf().join("cdc"))) })
+
+        debug!("Git path: {:?}", inner.git_repo_path());
+
+        Ok(Self { 
+            inner, 
+            cdc_manager: tokio::sync::Mutex::new(CdcMagager::new(store_path.to_path_buf().join("cdc"))),
+        })
+        
     }
 
     pub fn inner(&self) -> &GitBackend {
         &self.inner
     }
 
-    pub async fn write_file_to_cdc(&self, file: &mut File) -> Vec<u8> {
+    pub async fn write_file_to_cdc(&self, file: File) -> CdcResult<Vec<u8>> {
         let mut cdc_manager = self.cdc_manager.lock().await;
-        match cdc_manager.write_file_to_cdc(file) {
-            Ok(pointer_content) => pointer_content,
-            Err(e) => {
-                debug!("Failed to write file to CDC: {:?}", e);
-                return Vec::new();
-            }
-        }
+        let result = cdc_manager.write_file_to_cdc(file);
+        result
     }
 
     pub async fn read_file_from_cdc(&self, pointer_content: &CdcPointer, file: &mut File) -> Result<usize, CheckoutError> {
@@ -57,7 +59,6 @@ impl CdcBackendWrapper {
         match cdc_manager.read_file_from_cdc(pointer_content, file) {
             Ok(size) => Ok(size),
             Err(e) => {
-                debug!("Failed to read file from CDC: {:?}", e);
                 return Err(CheckoutError::Other {
                     message: format!("Failed to read file from CDC: {:?}", e),
                     err: Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
@@ -150,8 +151,56 @@ impl Backend for CdcBackendWrapper {
         self.inner.get_copy_records(paths, root, head)
     }
 
-    fn gc(&self,index: &dyn Index,keep_newer:SystemTime) -> BackendResult<()>  {
-        self.inner.gc(index, keep_newer)
+    fn gc(&self,index: &dyn Index,keep_newer:SystemTime) -> BackendResult<()> {
+        self.inner.gc(index, keep_newer)?;
+        let jj_repo = match gix::open(&self.inner.git_repo_path()) {
+            Ok(repo) => repo,
+            Err(e) => return Err(BackendError::Other(e.into())),
+        };
+
+        let mut keep_manifests = Vec::new();
+        if let Ok(objects) = jj_repo.objects.iter() {
+            for object in objects {
+                match object {
+                    Ok(object) => {
+                        match jj_repo.objects.try_header(&object) {
+                            Ok(Some(header)) => {
+                                if header.kind != gix::objs::Kind::Blob {
+                                    continue;
+                                }
+
+                                if header.size != CDC_POINTER_SIZE {
+                                    continue;
+                                }
+
+                                match jj_repo.find_blob(object) {
+                                    Ok(object) => {
+                                        if let Some(pointer) = CdcPointer::try_parse_from_bytes(&object.data) {
+                                            keep_manifests.push(pointer);
+                                        }
+                                    },
+                                    Err(e) => return Err(BackendError::Other(e.into())),
+                                }
+                            },
+                            Ok(None) => continue,
+                            Err(e) => return Err(BackendError::Other(e.into())),
+                        }
+                    }
+                    Err(e) => return Err(BackendError::Other(e.into())),
+                }
+            }
+        }
+
+        debug!("CDC Backend Wrapper: Found {:?} roots", keep_manifests.len());
+        for ob in &keep_manifests {
+                debug!("CDC Backend Wrapper: Found {:?} roots", ob);
+            }
+
+        let mut cdc_manager = self.cdc_manager.blocking_lock();
+        match cdc_manager.gc(keep_manifests) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(BackendError::Other(e.into())),
+        }
     }
 }
 
