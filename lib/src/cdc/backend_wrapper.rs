@@ -1,18 +1,17 @@
 #![expect(missing_docs)]
 
-use std::{fs::File, path::{Path, PathBuf}, pin::Pin, time::SystemTime};
+use std::{fs::File, path::Path, pin::Pin, time::SystemTime};
 
 use futures::stream::BoxStream;
-use gix::{objs::FindHeader, odb::HeaderExt};
+use gix::{objs::FindHeader};
 use tokio::{io::AsyncRead};
-use tracing::debug;
 
 use crate::{
     backend::{Backend, BackendError, BackendResult, ChangeId, Commit, CommitId, CopyHistory, CopyId, CopyRecord, FileId, SigningFn, SymlinkId, Tree, TreeId}, 
-    cdc::{cdc_config::CDC_POINTER_SIZE, cdc_error::CdcResult, cdc_manager::CdcMagager, pointer::{CdcPointer, TryParseResult}}, git_backend::{GitBackend, GitBackendLoadError}, 
+    cdc::{cdc_config::CDC_POINTER_SIZE, cdc_error::CdcResult, cdc_manager::CdcMagager, pointer::{CdcPointer}}, git_backend::{GitBackend, GitBackendLoadError}, 
     index::Index, 
     repo_path::{RepoPath, RepoPathBuf}, 
-    settings::UserSettings, working_copy::CheckoutError
+    settings::UserSettings
 };
 
 
@@ -35,8 +34,6 @@ impl CdcBackendWrapper {
     ) -> Result<Self, Box<GitBackendLoadError>> {
         let inner = GitBackend::load(settings, store_path)?;
 
-        debug!("Git path: {:?}", inner.git_repo_path());
-
         Ok(Self { 
             inner, 
             cdc_manager: tokio::sync::Mutex::new(CdcMagager::new(store_path.to_path_buf().join("cdc"))),
@@ -50,21 +47,21 @@ impl CdcBackendWrapper {
 
     pub async fn write_file_to_cdc(&self, file: File) -> CdcResult<Vec<u8>> {
         let mut cdc_manager = self.cdc_manager.lock().await;
-        let result = cdc_manager.write_file_to_cdc(file);
-        result
+        cdc_manager.write_file_to_cdc(file)
     }
 
-    pub async fn read_file_from_cdc(&self, pointer_content: &CdcPointer, file: &mut File) -> Result<usize, CheckoutError> {
+    pub async fn read_file_from_cdc(&self, pointer_content: &CdcPointer, file: &mut File) -> CdcResult<usize> {
         let mut cdc_manager = self.cdc_manager.lock().await;
-        match cdc_manager.read_file_from_cdc(pointer_content, file) {
-            Ok(size) => Ok(size),
-            Err(e) => {
-                return Err(CheckoutError::Other {
-                    message: format!("Failed to read file from CDC: {:?}", e),
-                    err: Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
-                });
-            }
-        }
+        cdc_manager.read_file_from_cdc(pointer_content, file)
+        // match cdc_manager.read_file_from_cdc(pointer_content, file) {
+        //     Ok(size) => Ok(size),
+        //     Err(e) => {
+        //         return Err(CheckoutError::Other {
+        //             message: format!("Failed to read file from CDC: {:?}", e),
+        //             err: Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+        //         });
+        //     }
+        // }
     }
 }
 
@@ -118,12 +115,10 @@ impl Backend for CdcBackendWrapper {
     }
 
     fn read_copy<'life0,'life1,'async_trait>(&'life0 self,id: &'life1 CopyId) ->  ::core::pin::Pin<Box<dyn ::core::future::Future<Output = BackendResult<CopyHistory> > + ::core::marker::Send+'async_trait> >where 'life0:'async_trait,'life1:'async_trait,Self:'async_trait {
-        debug!("CDC Backend Wrapper: Reading copy {:?}", id);
         self.inner.read_copy(id)
     }
 
     fn write_copy<'life0,'life1,'async_trait>(&'life0 self,copy: &'life1 CopyHistory) ->  ::core::pin::Pin<Box<dyn ::core::future::Future<Output = BackendResult<CopyId> > + ::core::marker::Send+'async_trait> >where 'life0:'async_trait,'life1:'async_trait,Self:'async_trait {
-        debug!("CDC Backend Wrapper: Writing copy {:?}", copy);
         self.inner.write_copy(copy)
     }
 
@@ -190,11 +185,6 @@ impl Backend for CdcBackendWrapper {
                 }
             }
         }
-
-        debug!("CDC Backend Wrapper: Found {:?} roots", keep_manifests.len());
-        for ob in &keep_manifests {
-                debug!("CDC Backend Wrapper: Found {:?} roots", ob);
-            }
 
         let mut cdc_manager = self.cdc_manager.blocking_lock();
         match cdc_manager.gc(keep_manifests) {

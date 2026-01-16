@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs::File, io::{BufWriter, Write}, ops::Deref, path::PathBuf, sync::{self, Arc}};
+use std::{collections::{HashMap, HashSet}, fs::File, io::{BufWriter, Write}, ops::Deref, path::PathBuf, sync::{self, Arc}};
 
 use fastcdc::v2020::{FastCDC};
 
@@ -182,9 +182,18 @@ impl StoreBackend for ChunkStoreBackend {
 
     fn gc(&self, keep_manifests: Vec<CdcPointer>) -> CdcResult<()> {
         let manifest_backend = self.manifest_backend.lock().unwrap();
-        let chunk_backend = self.chunk_backend.lock().unwrap();
-        // manifest_backend.gc(keep_manifests)?;
-        // chunk_backend.gc(keep_manifests)?;
+        let mut chunk_backend = self.chunk_backend.lock().unwrap();
+        
+        {
+            let mut keep_chunks_hash = HashSet::new();
+            for manifest in &keep_manifests {
+                let manifest = manifest_backend.read_manifest(manifest)?;
+                keep_chunks_hash.extend(manifest);
+            }
+            chunk_backend.gc(keep_chunks_hash)?;
+        }
+
+        manifest_backend.gc(&keep_manifests)?;
         Ok(())
     }
 }

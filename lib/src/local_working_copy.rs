@@ -2003,14 +2003,11 @@ impl TreeState {
         let size = if let Some(cdc_wrapper) = self.store.backend_impl::<crate::cdc::backend_wrapper::CdcBackendWrapper>() {
             match CdcPointer::try_parse(&mut contents).await {
                 Ok(TryParseResult::Parsed(pointer)) => {
-                    let start_time = std::time::Instant::now();
                     let size = cdc_wrapper.read_file_from_cdc(&pointer, &mut file).await
                         .map_err(|err| CheckoutError::Other {
                             message: format!("Failed to read file from CDC: {:?}", err),
                             err: err.into(),
                         })?;
-                    let end_time = std::time::Instant::now();
-                    tracing::debug!("read file {:?} time: {:?}", disk_path.display(), end_time.duration_since(start_time));
                     size
                 }
                 Ok(TryParseResult::NotCdcPointer(consumed_bytes)) => {

@@ -17,8 +17,6 @@ pub struct CdcMagager {
 
 impl CdcMagager {
     pub fn new(store_path: PathBuf) -> Self {
-
-
         Self { 
             store_path: store_path, 
             store_backend: None,

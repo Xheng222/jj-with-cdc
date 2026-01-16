@@ -12,6 +12,8 @@ pub const CHUNK_AVG_SIZE: u32 = 16 * 1024; // 16 KB
 pub const SUPER_CHUNK_SIZE_MIN: usize = (1024.0 * 1024.0 * 512.0 * 0.75) as usize; // 384 MB
 pub const SUPER_CHUNK_SIZE_MAX: usize = (1024.0 * 1024.0 * 512.0 * 1.25) as usize; // 640 MB
 
+pub const REPACK_THRESHOLD: u32 = 32 * 1024 * 1024; // 碎片超过 32 MB 就要重写
+
 pub const HASH_LENGTH: usize = 32;
 pub const MAGIC: &[u8] = b"\x00CDC\x00";  // 二进制魔数
 pub const MAGIC_LENGTH: usize = MAGIC.len();

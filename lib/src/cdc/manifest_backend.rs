@@ -1,5 +1,5 @@
 
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 
 use gix::{Id, ObjectId, Repository};
 
@@ -14,8 +14,6 @@ pub trait ManifestBackend: Send {
     fn write_manifest(&self, manifest: CdcManifest) -> CdcResult<CdcPointerBytes>;
     /// 读取 manifest
     fn read_manifest(&self, pointer: &CdcPointer) -> CdcResult<CdcManifest>;
-    /// 移除 manifest
-    fn _remove_manifest(&self, pointer: &CdcPointer) -> CdcResult<()>;
     /// GC
     fn gc(&self, keep_manifests: &[CdcPointer]) -> CdcResult<()>;
 
@@ -84,9 +82,6 @@ impl ManifestBackend for GitManifestBackend {
         let new_tree_oid = editor.write().map_err(CdcError::from_git)?;
         self.set_manifest_tree_oid(new_tree_oid)?;
 
-        tracing::debug!("CDC Manifest Backend: Written manifest {:?}", manifest_hash);
-        tracing::debug!("CDC Manifest Backend: Written manifest len {:?}", manifest_hash.as_bytes().len());
-
         Ok(CdcPointer::new(manifest_hash).serialize())
     }
 
@@ -97,18 +92,74 @@ impl ManifestBackend for GitManifestBackend {
         Ok(manifest)
     }
 
-    fn _remove_manifest(&self, pointer: &CdcPointer) -> CdcResult<()> {
-        let (prefix, suffix) = split_manifest_hash(pointer.hash());
-        let manifest_tree_oid = self.get_manifest_tree_oid()?;
-        let mut editor = self.inner.edit_tree(manifest_tree_oid).map_err(CdcError::from_git)?;
-        editor.remove(format!("{prefix}/{suffix}")).map_err(CdcError::from_git)?;
-        let new_tree_oid = editor.write().map_err(CdcError::from_git)?;
-        self.set_manifest_tree_oid(new_tree_oid)?;
-        Ok(())
-    }
 
     fn gc(&self, keep_manifests: &[CdcPointer]) -> CdcResult<()> {
+        let keep_set: HashSet<_> = keep_manifests.iter().map(|p| p.hash()).collect();
 
+        // 获取当前的 manifest tree
+        let manifest_tree_oid = self.get_manifest_tree_oid()?;
+        let tree = self.inner.find_tree(manifest_tree_oid).map_err(CdcError::from_git)?;
+
+        // 收集所有需要删除的 manifest 路径
+        let mut to_remove = Vec::new();
+        let mut total_manifests = 0;
+
+        // 遍历 tree 中的所有条目
+        for entry in tree.iter() {
+            let entry = entry.map_err(CdcError::from_git)?;
+            
+            // 如果是目录（prefix 目录），需要进一步遍历
+            if entry.mode().is_tree() {
+                let prefix = entry.filename();
+
+                let subtree_oid = entry.oid();
+                let subtree = self.inner.find_tree(subtree_oid).map_err(CdcError::from_git)?;
+                
+                // 遍历子目录中的 blob
+                for subentry in subtree.iter() {
+                    let subentry = subentry.map_err(CdcError::from_git)?;
+                    if subentry.mode().is_blob() {
+                        total_manifests += 1;
+                        let suffix = subentry.filename();
+                        
+                        // 重建完整的 hash
+                        let full_hash = format!("{}{}", prefix, suffix);
+                        
+                        // 如果不在保留集合中，标记为删除
+                        if !keep_set.contains(&full_hash) {
+                            let path = format!("{}/{}", prefix, suffix);
+                            to_remove.push(path);
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::debug!("CDC Manifest GC: Total manifests: {}, Removing: {}", 
+            total_manifests, to_remove.len());
+
+        // 如果有需要删除的 manifest，执行删除操作
+        if !to_remove.is_empty() {
+            let mut editor = self.inner.edit_tree(manifest_tree_oid).map_err(CdcError::from_git)?;
+            
+            for path in to_remove {
+                editor.remove(path).map_err(CdcError::from_git)?;
+            }
+            
+            let new_tree_oid = editor.write().map_err(CdcError::from_git)?;
+            self.set_manifest_tree_oid(new_tree_oid)?;
+        }
+
+        // 调用 git gc 清理仓库
+        let repo_path = self.inner.path();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .arg("gc")
+            .arg("--aggressive")
+            .arg("--prune=now")
+            .status()
+            .ok();
         Ok(())
     }
 }
