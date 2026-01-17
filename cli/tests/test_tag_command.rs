@@ -297,6 +297,26 @@ fn test_tag_list() {
     [EOF]
     ");
 
+    // Filter by revset
+    insta::assert_snapshot!(work_dir.run_jj(["tag", "list", "-rsubject(commit1)"]), @"
+    test_tag: rlvkpnrz 893e67dc (empty) commit1
+    [EOF]
+    ");
+    insta::assert_snapshot!(work_dir.run_jj(["tag", "list", "-rsubject(commit2)"]), @"
+    conflicted_tag (conflicted):
+      - rlvkpnrz 893e67dc (empty) commit1
+      + zsuskuln 76abdd20 (empty) commit2
+      + royxmykx 13c4e819 (empty) commit3
+    test_tag2: zsuskuln 76abdd20 (empty) commit2
+    [EOF]
+    ");
+    // Filter by revset and name, which aren't intersected
+    insta::assert_snapshot!(work_dir.run_jj(["tag", "list", "-rsubject(commit1)", "test_tag2"]), @"
+    test_tag: rlvkpnrz 893e67dc (empty) commit1
+    test_tag2: zsuskuln 76abdd20 (empty) commit2
+    [EOF]
+    ");
+
     // Unmatched exact name pattern should be warned. "test_tag2" exists, but
     // isn't included in the match.
     insta::assert_snapshot!(
@@ -305,6 +325,14 @@ fn test_tag_list() {
     [EOF]
     ------- stderr -------
     Warning: No matching tags for names: unknown
+    [EOF]
+    ");
+
+    insta::assert_snapshot!(work_dir.run_jj(["tag", "list", "--conflicted"]), @"
+    conflicted_tag (conflicted):
+      - rlvkpnrz 893e67dc (empty) commit1
+      + zsuskuln 76abdd20 (empty) commit2
+      + royxmykx 13c4e819 (empty) commit3
     [EOF]
     ");
 
@@ -360,6 +388,52 @@ fn test_tag_list() {
       - rlvkpnrz 893e67dc (empty) commit1
       + zsuskuln 76abdd20 (empty) commit2
       + royxmykx 13c4e819 (empty) commit3
+    [EOF]
+    ");
+}
+
+#[test]
+fn test_tag_list_remotes() {
+    let test_env = TestEnvironment::default();
+
+    // TODO: set up remote tags in a similar way to test_bookmark_list_tracked()
+
+    test_env
+        .run_jj_in(".", ["git", "init", "--colocate", "local"])
+        .success();
+    let local_dir = test_env.work_dir("local");
+
+    local_dir
+        .run_jj(["new", "root()", "-m", "local-only"])
+        .success();
+    local_dir.run_jj(["tag", "set", "local-only"]).success();
+
+    let output = local_dir.run_jj(["tag", "list", "--all-remotes"]);
+    insta::assert_snapshot!(output, @"
+    local-only: rlvkpnrz d3e8d245 (empty) local-only
+      @git: rlvkpnrz d3e8d245 (empty) local-only
+    [EOF]
+    ");
+
+    // Since there's no way to track/untrack tags manually, --tracked is useless
+    // right now.
+    let output = local_dir.run_jj(["tag", "list", "--tracked"]);
+    insta::assert_snapshot!(output, @"");
+
+    let output = local_dir.run_jj(["tag", "list", "--tracked", "--remote=git"]);
+    insta::assert_snapshot!(output, @"
+    local-only: rlvkpnrz d3e8d245 (empty) local-only
+      @git: rlvkpnrz d3e8d245 (empty) local-only
+    [EOF]
+    ");
+
+    let output = local_dir.run_jj(["tag", "list", "--remote=origin"]);
+    insta::assert_snapshot!(output, @"");
+
+    let output = local_dir.run_jj(["tag", "list", "--remote=git"]);
+    insta::assert_snapshot!(output, @"
+    local-only: rlvkpnrz d3e8d245 (empty) local-only
+      @git: rlvkpnrz d3e8d245 (empty) local-only
     [EOF]
     ");
 }

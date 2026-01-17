@@ -256,9 +256,9 @@ revsets (expressions) as arguments.
 
 * `bookmarks([pattern])`: All local bookmark targets. If `pattern` is specified,
   this selects the bookmarks whose name match the given [string
-  pattern](#string-patterns). For example, `bookmarks(push)` would match the
-  bookmarks `push-123` and `repushed` but not the bookmark `main`. If a bookmark is
-  in a conflicted state, all its possible targets are included.
+  pattern](#string-patterns). For example, `bookmarks(*push*)` would match the
+  bookmarks `push-123` and `repushed` but not the bookmark `main`. If a bookmark
+  is in a conflicted state, all its possible targets are included.
 
 * `remote_bookmarks([bookmark_pattern], [[remote=]remote_pattern])`: All remote
   bookmarks targets across all remotes. If just the `bookmark_pattern` is
@@ -267,7 +267,7 @@ revsets (expressions) as arguments.
   `bookmark_pattern` and `remote_pattern` are specified, the selection is
   further restricted to just the remotes whose names match `remote_pattern`.
 
-  For example, `remote_bookmarks(push, ri)` would match the bookmarks
+  For example, `remote_bookmarks(*push*, *ri*)` would match the bookmarks
   `push-123@origin` and `repushed@private` but not `push-123@upstream` or
   `main@origin` or `main@upstream`. If a bookmark is in a conflicted state, all
   its possible targets are included.
@@ -283,11 +283,11 @@ revsets (expressions) as arguments.
   All targets of untracked remote bookmarks. Supports the same optional arguments
   as `remote_bookmarks()`.
 
-* `tags([pattern])`: All tag targets. If `pattern` is specified,
-  this selects the tags whose name match the given [string
-  pattern](#string-patterns). For example, `tags(v1)` would match the
-  tags `v123` and `rev1` but not the tag `v2`. If a tag is
-  in a conflicted state, all its possible targets are included.
+* `tags([pattern])`: All tag targets. If `pattern` is specified, this selects
+  the tags whose name match the given [string pattern](#string-patterns). For
+  example, `tags(*v1*)` would match the tags `v123` and `rev1` but not the tag
+  `v2`. If a tag is in a conflicted state, all its possible targets are
+  included.
 
 * `visible_heads()`: All visible heads (same as `heads(all())` if no hidden
   revisions are mentioned).
@@ -380,17 +380,19 @@ revsets (expressions) as arguments.
   Some file patterns might need quoting because the `expression` must also be
   parsable as a revset. For example, `.` has to be quoted in `files(".")`.
 
-* `diff_contains(text, [files])`: Commits containing diffs matching the given
+* `diff_lines(text, [files])`: Commits containing diffs matching the given
   `text` pattern line by line.
 
   The search paths can be narrowed by the `files` expression. All modified files
   are scanned by default, but it is likely to change in future version to
   respect the command line path arguments.
 
-  For example, `diff_contains("*TODO*", "src")` will search revisions where "TODO"
+  For example, `diff_lines("*TODO*", "src")` will search revisions where "TODO"
   is added to or removed from files under "src".
 
 * `conflicts()`: Commits with conflicts.
+
+* `divergent()`: Commits that are [divergent](glossary.md#divergent-change).
 
 * `present(x)`: Same as `x`, but evaluated to `none()` if any of the commits
   in `x` doesn't exist (e.g. is an unknown bookmark name.)

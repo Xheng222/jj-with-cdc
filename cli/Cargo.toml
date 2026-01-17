@@ -87,6 +87,8 @@ once_cell = { workspace = true }
 pest = { workspace = true }
 pest_derive = { workspace = true }
 pollster = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
 rayon = { workspace = true }
 regex = { workspace = true }
 rpassword = { workspace = true }
@@ -95,6 +97,7 @@ sapling-streampager = { workspace = true }
 scm-record = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+shlex = { workspace = true }
 slab = { workspace = true }
 strsim = { workspace = true }
 tempfile = { workspace = true }

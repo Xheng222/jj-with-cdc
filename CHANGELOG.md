@@ -10,16 +10,47 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Release highlights
 
+* Per-repo and per-workspace config is now stored outside the repo, for security
+  reasons. This is not a breaking change because we automatically migrate
+  legacy repos to this new format. `.jj/repo/config.toml` and
+  `.jj/workspace-config.toml` should no longer be used.
+
 ### Breaking changes
+
+* Deprecated `ui.always-allow-large-revsets` setting and `all:` revset modifier
+  have been removed.
 
 ### Deprecations
 
+* The revset function `diff_contains()` has been renamed to `diff_lines()`.
+
 ### New features
+
+* `jj git fetch` now shows details of abandoned commits (change IDs and
+  descriptions) by default, matching the `jj abandon` output format.
+  [#3081](https://github.com/jj-vcs/jj/issues/3081)
 
 * `jj git push --bookmark <name>` will now automatically track the bookmark if
   it isn't tracked with any remote already.
 
+* Add `git_web_url([remote])` template function that converts a git remote URL
+  to a web URL, suitable for opening in a browser. Defaults to the "origin"
+  remote.
+
+* New `divergent()` revset function for divergent changes.
+
+* A new config option `remotes.<name>.auto-track-created-bookmarks` behaves
+  similarly to `auto-track-bookmarks`, but it only applies to bookmarks created
+  locally. Setting it to `"*"` is now the closest replacement for the deprecated
+  `git.push-new-bookmarks` option.
+
+* `jj tag list` can now be filtered by revset.
+
 ### Fixed bugs
+
+* `jj git init --colocate` now refuses to run inside a Git worktree, providing
+  a helpful error message with alternatives.
+  [#8052](https://github.com/jj-vcs/jj/issues/8052)
 
 * `jj git push` now ensures that tracked remote bookmarks are updated even if
   there are no mappings in the Git fetch refspecs.
@@ -28,6 +59,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 * Conflicted bookmarks and tags in `trunk()` will no longer generate verbose
   warnings. The configured `trunk()` alias will temporarily be disabled.
   [#8501](https://github.com/jj-vcs/jj/issues/8501)
+
+* Dynamic shell completion for `jj config unset` now only completes
+  configuration options which are set.
+  [#7774](https://github.com/jj-vcs/jj/issues/7774)
+
+* Setting the editor via `ui.editor`, `$EDITOR`, or `JJ_EDITOR` now respects shell quoting.
+
+* `jj gerrit upload` will no longer swallow errors and surface if changes fail
+  to get pushed to gerrit.
+  [#8568](https://github.com/jj-vcs/jj/issues/8568)
+
+* `jj file track --include-ignored` now works when `fsmonitor.backend="watchman"`.
+  [#8427](https://github.com/jj-vcs/jj/issues/8427)
+
+* Conflict labels are now preserved correctly when restoring files from commits
+  with different conflict labels.
 
 ## [0.37.0] - 2026-01-07
 

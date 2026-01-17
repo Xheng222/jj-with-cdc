@@ -23,16 +23,19 @@ use std::path::Path;
 use std::time::Duration;
 use std::time::Instant;
 
+use bstr::ByteSlice as _;
 use crossterm::terminal::Clear;
 use crossterm::terminal::ClearType;
 use indoc::writedoc;
 use itertools::Itertools as _;
+use jj_lib::commit::Commit;
 use jj_lib::fmt_util::binary_prefix;
 use jj_lib::git;
 use jj_lib::git::FailedRefExportReason;
 use jj_lib::git::GitExportStats;
 use jj_lib::git::GitImportOptions;
 use jj_lib::git::GitImportStats;
+use jj_lib::git::GitPushStats;
 use jj_lib::git::GitRefKind;
 use jj_lib::git::GitSettings;
 use jj_lib::op_store::RefTarget;
@@ -45,6 +48,8 @@ use jj_lib::workspace::Workspace;
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::cleanup_guard::CleanupGuard;
+use crate::cli_util::WorkspaceCommandTransaction;
+use crate::cli_util::print_updated_commits;
 use crate::command_error::CommandError;
 use crate::command_error::cli_error;
 use crate::command_error::user_error;
@@ -87,6 +92,35 @@ pub fn absolute_git_url(cwd: &Path, source: &str) -> Result<String, CommandError
     }
     // It's less likely that cwd isn't utf-8, so just fall back to original source.
     Ok(String::from_utf8(url.to_bstring().into()).unwrap_or_else(|_| source.to_owned()))
+}
+
+/// Converts a git remote URL to a normalized HTTPS URL for web browsing.
+///
+/// Returns `None` if the URL cannot be converted.
+fn git_remote_url_to_web(url: &gix::Url) -> Option<String> {
+    if url.scheme == gix::url::Scheme::File || url.host().is_none() {
+        return None;
+    }
+
+    let host = url.host()?;
+    let path = url.path.to_str().ok()?;
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+
+    Some(format!("https://{host}/{path}"))
+}
+
+/// Returns the web URL for a git remote.
+///
+/// Attempts to convert the remote's URL to an HTTPS web URL.
+/// Returns `None` if the remote doesn't exist or its URL cannot be converted.
+pub fn get_remote_web_url(repo: &ReadonlyRepo, remote_name: &str) -> Option<String> {
+    let git_repo = git::get_git_repo(repo.store()).ok()?;
+    let remote = git_repo.try_find_remote(remote_name)?.ok()?;
+    let url = remote
+        .url(gix::remote::Direction::Fetch)
+        .or_else(|| remote.url(gix::remote::Direction::Push))?;
+    git_remote_url_to_web(url)
 }
 
 // Based on Git's implementation: https://github.com/git/git/blob/43072b4ca132437f21975ac6acc6b72dc22fd398/sideband.c#L178
@@ -209,41 +243,50 @@ pub fn load_git_import_options(
 
 pub fn print_git_import_stats(
     ui: &Ui,
-    repo: &dyn Repo,
+    tx: &WorkspaceCommandTransaction<'_>,
     stats: &GitImportStats,
-    show_ref_stats: bool,
 ) -> Result<(), CommandError> {
     let Some(mut formatter) = ui.status_formatter() else {
         return Ok(());
     };
-    if show_ref_stats {
-        for (kind, changes) in [
-            (GitRefKind::Bookmark, &stats.changed_remote_bookmarks),
-            (GitRefKind::Tag, &stats.changed_remote_tags),
-        ] {
-            let refs_stats = changes
-                .iter()
-                .map(|(symbol, (remote_ref, ref_target))| {
-                    RefStatus::new(kind, symbol.as_ref(), remote_ref, ref_target, repo)
-                })
-                .collect_vec();
-            let Some(max_width) = refs_stats.iter().map(|x| x.symbol.width()).max() else {
-                continue;
-            };
-            for status in refs_stats {
-                status.output(max_width, &mut *formatter)?;
-            }
+    for (kind, changes) in [
+        (GitRefKind::Bookmark, &stats.changed_remote_bookmarks),
+        (GitRefKind::Tag, &stats.changed_remote_tags),
+    ] {
+        let refs_stats = changes
+            .iter()
+            .map(|(symbol, (remote_ref, ref_target))| {
+                RefStatus::new(kind, symbol.as_ref(), remote_ref, ref_target, tx.repo())
+            })
+            .collect_vec();
+        let Some(max_width) = refs_stats.iter().map(|x| x.symbol.width()).max() else {
+            continue;
+        };
+        for status in refs_stats {
+            status.output(max_width, &mut *formatter)?;
         }
     }
 
     if !stats.abandoned_commits.is_empty() {
         writeln!(
             formatter,
-            "Abandoned {} commits that are no longer reachable.",
+            "Abandoned {} commits that are no longer reachable:",
             stats.abandoned_commits.len()
         )?;
+        let abandoned_commits: Vec<Commit> = stats
+            .abandoned_commits
+            .iter()
+            .map(|id| tx.repo().store().get_commit(id))
+            .try_collect()?;
+        let template = tx.commit_summary_template();
+        print_updated_commits(&mut *formatter, &template, &abandoned_commits)?;
     }
 
+    print_failed_git_import(ui, stats)?;
+    Ok(())
+}
+
+fn print_failed_git_import(ui: &Ui, stats: &GitImportStats) -> Result<(), CommandError> {
     if !stats.failed_ref_names.is_empty() {
         writeln!(ui.warning_default(), "Failed to import some Git refs:")?;
         let mut formatter = ui.stderr_formatter();
@@ -267,7 +310,22 @@ pub fn print_git_import_stats(
             name = git::REMOTE_NAME_FOR_LOCAL_GIT_REPO.as_symbol(),
         )?;
     }
+    Ok(())
+}
 
+/// Prints only the summary of git import stats (abandoned count, failed refs).
+/// Use this when a WorkspaceCommandTransaction is not available.
+pub fn print_git_import_stats_summary(ui: &Ui, stats: &GitImportStats) -> Result<(), CommandError> {
+    if !stats.abandoned_commits.is_empty()
+        && let Some(mut formatter) = ui.status_formatter()
+    {
+        writeln!(
+            formatter,
+            "Abandoned {} commits that are no longer reachable.",
+            stats.abandoned_commits.len()
+        )?;
+    }
+    print_failed_git_import(ui, stats)?;
     Ok(())
 }
 
@@ -539,6 +597,66 @@ pub fn print_git_export_stats(ui: &Ui, stats: &GitExportStats) -> Result<(), std
     Ok(())
 }
 
+pub fn print_push_stats(ui: &Ui, stats: &GitPushStats) -> io::Result<()> {
+    if !stats.rejected.is_empty() {
+        writeln!(
+            ui.warning_default(),
+            "The following references unexpectedly moved on the remote:"
+        )?;
+        let mut formatter = ui.stderr_formatter();
+        for (reference, reason) in &stats.rejected {
+            write!(formatter, "  ")?;
+            write!(formatter.labeled("git_ref"), "{}", reference.as_symbol())?;
+            if let Some(r) = reason {
+                write!(formatter, " (reason: {r})")?;
+            }
+            writeln!(formatter)?;
+        }
+        drop(formatter);
+        writeln!(
+            ui.hint_default(),
+            "Try fetching from the remote, then make the bookmark point to where you want it to \
+             be, and push again.",
+        )?;
+    }
+    if !stats.remote_rejected.is_empty() {
+        writeln!(
+            ui.warning_default(),
+            "The remote rejected the following updates:"
+        )?;
+        let mut formatter = ui.stderr_formatter();
+        for (reference, reason) in &stats.remote_rejected {
+            write!(formatter, "  ")?;
+            write!(formatter.labeled("git_ref"), "{}", reference.as_symbol())?;
+            if let Some(r) = reason {
+                write!(formatter, " (reason: {r})")?;
+            }
+            writeln!(formatter)?;
+        }
+        drop(formatter);
+        writeln!(
+            ui.hint_default(),
+            "Try checking if you have permission to push to all the bookmarks."
+        )?;
+    }
+    if !stats.unexported_bookmarks.is_empty() {
+        writeln!(
+            ui.warning_default(),
+            "The following bookmarks couldn't be updated locally:"
+        )?;
+        let mut formatter = ui.stderr_formatter();
+        for (symbol, reason) in &stats.unexported_bookmarks {
+            write!(formatter, "  ")?;
+            write!(formatter.labeled("bookmark"), "{symbol}")?;
+            for err in iter::successors(Some(reason as &dyn error::Error), |err| err.source()) {
+                write!(formatter, ": {err}")?;
+            }
+            writeln!(formatter)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::MAIN_SEPARATOR;
@@ -593,6 +711,36 @@ mod tests {
             absolute_git_url(&cwd, "https://user:pass@example.org/").unwrap(),
             "https://user:pass@example.org/"
         );
+    }
+
+    #[test]
+    fn test_git_remote_url_to_web() {
+        let to_web = |s| git_remote_url_to_web(&gix::Url::try_from(s).unwrap());
+
+        // SSH URL
+        assert_eq!(
+            to_web("git@github.com:owner/repo"),
+            Some("https://github.com/owner/repo".to_owned())
+        );
+        // HTTPS URL with .git suffix
+        assert_eq!(
+            to_web("https://github.com/owner/repo.git"),
+            Some("https://github.com/owner/repo".to_owned())
+        );
+        // SSH URL with ssh:// scheme
+        assert_eq!(
+            to_web("ssh://git@github.com/owner/repo"),
+            Some("https://github.com/owner/repo".to_owned())
+        );
+        // git:// protocol
+        assert_eq!(
+            to_web("git://github.com/owner/repo.git"),
+            Some("https://github.com/owner/repo".to_owned())
+        );
+        // File URL returns None
+        assert_eq!(to_web("file:///path/to/repo"), None);
+        // Local path returns None
+        assert_eq!(to_web("/path/to/repo"), None);
     }
 
     #[test]

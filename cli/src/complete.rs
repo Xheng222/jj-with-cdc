@@ -755,6 +755,43 @@ pub fn leaf_config_key_value(current: &std::ffi::OsStr) -> Vec<CompletionCandida
     }
 }
 
+pub fn config_keys_to_unset() -> Vec<CompletionCandidate> {
+    let Ok(config_level_flag) = std::env::args()
+        .filter(|arg| matches!(arg.as_str(), "--user" | "--repo" | "--workspace"))
+        .at_most_one()
+    else {
+        return Vec::new();
+    };
+
+    with_jj(|jj, _| {
+        const TEMPLATE: &str = r#"name ++ "\t" ++ source ++ "\t" ++ stringify(value).replace(regex:'\n\s*', " ") ++ "\n""#;
+        let list_output = jj
+            .build()
+            .args(["config", "list"])
+            // Only suggest unsetting overridden config options if the corresponding level is
+            // already specified.
+            .args(
+                config_level_flag
+                    .is_some()
+                    .then_some("--include-overridden"),
+            )
+            .args(config_level_flag)
+            .args(["--template", TEMPLATE])
+            .output()
+            .map_err(user_error)?;
+        Ok(String::from_utf8_lossy(&list_output.stdout)
+            .lines()
+            .filter_map(|line| line.split('\t').collect_tuple())
+            .filter(|(_, source, _)| matches!(*source, "user" | "repo" | "workspace"))
+            .map(|(name, source, value)| {
+                CompletionCandidate::new(name)
+                    .tag(Some(source.to_string().into()))
+                    .help(Some(format!("{source}: {value}").into()))
+            })
+            .collect())
+    })
+}
+
 pub fn branch_name_equals_any_revision(current: &std::ffi::OsStr) -> Vec<CompletionCandidate> {
     let Some(current) = current.to_str() else {
         return Vec::new();
@@ -1081,9 +1118,11 @@ fn get_jj_command() -> Result<(JjBuilder, UserSettings), CommandError> {
     config_env.reload_user_config(&mut raw_config).ok();
     if let Ok(loader) = &maybe_cwd_workspace_loader {
         config_env.reset_repo_path(loader.repo_path());
-        config_env.reload_repo_config(&mut raw_config).ok();
+        config_env.reload_repo_config(&ui, &mut raw_config).ok();
         config_env.reset_workspace_path(loader.workspace_root());
-        config_env.reload_workspace_config(&mut raw_config).ok();
+        config_env
+            .reload_workspace_config(&ui, &mut raw_config)
+            .ok();
     }
     let mut config = config_env.resolve_config(&raw_config)?;
     // skip 2 because of the clap_complete prelude: jj -- jj <actual args...>
@@ -1101,9 +1140,11 @@ fn get_jj_command() -> Result<(JjBuilder, UserSettings), CommandError> {
         // Try to update repo-specific config on a best-effort basis.
         if let Ok(loader) = DefaultWorkspaceLoaderFactory.create(&cwd.join(&repository)) {
             config_env.reset_repo_path(loader.repo_path());
-            config_env.reload_repo_config(&mut raw_config).ok();
+            config_env.reload_repo_config(&ui, &mut raw_config).ok();
             config_env.reset_workspace_path(loader.workspace_root());
-            config_env.reload_workspace_config(&mut raw_config).ok();
+            config_env
+                .reload_workspace_config(&ui, &mut raw_config)
+                .ok();
             if let Ok(new_config) = config_env.resolve_config(&raw_config) {
                 config = new_config;
             }
@@ -1344,14 +1385,6 @@ mod tests {
         assert_eq!(split_revset_trailing_name("foo("), Some(("foo(", "")));
         assert_eq!(split_revset_trailing_name("foo()"), None);
         assert_eq!(split_revset_trailing_name("foo(bar)"), None);
-    }
-
-    #[test]
-    fn test_split_revset_trailing_name_with_modifier() {
-        assert_eq!(split_revset_trailing_name("all:"), Some(("all:", "")));
-        assert_eq!(split_revset_trailing_name("all: "), Some(("all: ", "")));
-        assert_eq!(split_revset_trailing_name("all:f"), Some(("all:", "f")));
-        assert_eq!(split_revset_trailing_name("all: f"), Some(("all: ", "f")));
     }
 
     #[test]
