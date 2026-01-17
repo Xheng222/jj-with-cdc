@@ -105,7 +105,7 @@ mod chunk_writer {
         current_size: u32,
         lock_file: File,
         store_path: PathBuf,
-        send_tx: mpsc::SyncSender<ChunkWriterMessage>,
+        send_tx: mpsc::Sender<ChunkWriterMessage>,
         sync_recv: mpsc::Receiver<CdcResult<()>>,
     }
 
@@ -129,7 +129,7 @@ mod chunk_writer {
                 (1, 0)
             };
 
-            let (send_tx, recv_tx) = mpsc::sync_channel(8192);
+            let (send_tx, recv_tx) = mpsc::channel();
             let (sync_tx, sync_recv) = mpsc::sync_channel(0);
 
             let store_path_ = store_path.join(PACKS_DIR);
@@ -272,110 +272,6 @@ mod chunk_writer {
     }
 }
 
-// pub mod redb_backend {
-//     use std::{collections::HashMap, path::PathBuf};
-//     use memmap2::Mmap;
-//     use redb::{Database, ReadOnlyTable, ReadTransaction, ReadableDatabase, TableDefinition};
-//     use crate::cdc::{cdc_config::{CHUNK_DB, HASH_LENGTH}, cdc_error::CdcResult, chunk_backend::{ChunkBackend, ChunkLocation, ChunkWriterBackend}};
-//     use crate::cdc::chunk_backend::chunk_writer::ChunkWriter;
-//     // 数据表定义
-//     const TABLE_CHUNKS: TableDefinition<[u8; HASH_LENGTH], [u8; 12]> = TableDefinition::new("chunks");
-//     pub struct RedbChunkBackend {
-//         chunk_db: Database,
-//         chunk_table: ReadOnlyTable<[u8; HASH_LENGTH], [u8; 12]>,
-//         mem_cache_table: HashMap<[u8; HASH_LENGTH], ChunkLocation>,
-//         chunk_writer: ChunkWriter,
-//     }
-//     impl RedbChunkBackend {
-//         pub fn new(store_path: &PathBuf) -> CdcResult<Self> {
-//             let chunk_writer = ChunkWriter::new(store_path)?;
-//             let chunk_db = match Database::open(store_path.join(CHUNK_DB)) {
-//                 Ok(db) => db,
-//                 Err(_) => {
-//                     let db = Database::create(store_path.join(CHUNK_DB))?;
-//                     let write_txn = db.begin_write()?;
-//                     {
-//                         write_txn.open_table(TABLE_CHUNKS)?;
-//                     }
-//                     write_txn.commit()?;
-//                     db
-//                 }
-//             };
-//             let table_rx: ReadTransaction = chunk_db.begin_read()?;
-//             let chunk_table = table_rx.open_table(TABLE_CHUNKS)?;
-//             Ok(Self {
-//                 chunk_db: chunk_db,
-//                 chunk_table: chunk_table,
-//                 mem_cache_table: HashMap::new(),
-//                 chunk_writer: chunk_writer,
-//             })
-//         }
-//     }
-//     impl ChunkBackend for RedbChunkBackend {
-//         fn read_index(&self, hash: &[u8; HASH_LENGTH]) -> CdcResult<Option<ChunkLocation>> {
-//             if let Some(location) = self.mem_cache_table.get(hash) {
-//                 return Ok(Some(location.clone()));
-//             }
-//             let location_bytes = match self.chunk_table.get(hash)? {
-//                 Some(guard) => guard.value(),
-//                 None => return Ok(None),
-//             };
-//             Ok(Some(ChunkLocation::from_bytes(location_bytes)))
-//         }
-//         fn read_index_mut(&mut self, hash: &[u8; HASH_LENGTH]) -> CdcResult<Option<&mut ChunkLocation>> {
-//             if self.mem_cache_table.contains_key(hash) {
-//                 return Ok(self.mem_cache_table.get_mut(hash));
-//             }
-//             else {
-//                 let location_bytes = match self.chunk_table.get(hash) {
-//                     Ok(guard) => {
-//                         match guard {
-//                             Some(guard) => guard.value(),
-//                             None => return Ok(None),
-//                         }
-//                     },
-//                     Err(e) => return Err(e.into()),
-//                 };
-//                 self.mem_cache_table.insert(*hash, ChunkLocation::from_bytes(location_bytes));
-//                 Ok(self.mem_cache_table.get_mut(hash))
-//             }
-//         }
-//         fn update_index(&mut self, hash: &[u8; HASH_LENGTH], location: ChunkLocation) {
-//             self.mem_cache_table.insert(*hash, location);
-//         }
-//         fn _remove(&mut self, hash: &[u8; HASH_LENGTH]) -> CdcResult<()> {
-//             self.mem_cache_table.remove(hash);
-//             Ok(())
-//         }
-//     }
-//     impl ChunkWriterBackend for RedbChunkBackend {
-//         #[inline]
-//         fn write_chunk(&self, location: ChunkLocation, data: &[u8]) -> CdcResult<()> {
-//             self.chunk_writer.write_chunk(location, data)
-//         }
-//         #[inline]
-//         fn get_next_chunk_index(&mut self, data_len: usize) -> ChunkLocation {
-//             self.chunk_writer.get_next_chunk_index(data_len)
-//         }
-//         #[inline]
-//         fn read_chunk_file_mmap(&self, pack_id: u32) -> CdcResult<Mmap> {
-//             self.chunk_writer.read_chunk_file_mmap(pack_id)
-//         }
-//         fn sync_writer(&mut self) -> CdcResult<()> {
-//             self.chunk_writer.sync_writer()?;
-//             let chunk_wtx = self.chunk_db.begin_write()?;
-//             {
-//                 let mut chunk_table = chunk_wtx.open_table(TABLE_CHUNKS)?;
-//                 for (hash, location) in self.mem_cache_table.drain() {
-//                     chunk_table.insert(hash, location.to_bytes())?;
-//                 }
-//             }
-//             chunk_wtx.commit()?;
-//             self.chunk_table = self.chunk_db.begin_read()?.open_table(TABLE_CHUNKS)?;
-//             Ok(())
-//         }
-//     }
-// }
 
 pub mod hashmap_backend {
     use std::{
