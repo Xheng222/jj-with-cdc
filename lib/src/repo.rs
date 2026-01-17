@@ -442,9 +442,9 @@ impl Default for StoreFactories {
         factories.add_backend(
             crate::cdc::backend_wrapper::CdcBackendWrapper::name(),
             Box::new(|settings, store_path| {
-                Ok(Box::new(crate::cdc::backend_wrapper::CdcBackendWrapper::load(
-                    settings, store_path,
-                )?))
+                Ok(Box::new(
+                    crate::cdc::backend_wrapper::CdcBackendWrapper::load(settings, store_path)?,
+                ))
             }),
         );
         #[cfg(feature = "testing")]

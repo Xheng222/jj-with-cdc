@@ -13,8 +13,6 @@ pub mod cdc_manager;
 /// Manifest module
 pub mod pointer;
 
-
-
 mod cdc_config;
 mod chunk_backend;
 mod manifest_backend;

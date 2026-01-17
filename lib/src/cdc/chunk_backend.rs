@@ -1,10 +1,8 @@
-use std::{collections::HashSet};
+use std::collections::HashSet;
 
 use memmap2::Mmap;
 
 use crate::cdc::{cdc_config::HASH_LENGTH, cdc_error::CdcResult};
-
-
 
 pub trait ChunkWriterBackend: Send {
     /// 写入 chunk
@@ -38,7 +36,10 @@ pub trait ChunkBackend: ChunkWriterBackend + Send {
     /// 获取 chunk 的位置
     fn read_index(&self, hash: &[u8; HASH_LENGTH]) -> CdcResult<Option<&ChunkLocation>>;
 
-    fn _read_index_mut(&mut self, hash: &[u8; HASH_LENGTH]) -> CdcResult<Option<&mut ChunkLocation>>;
+    fn _read_index_mut(
+        &mut self,
+        hash: &[u8; HASH_LENGTH],
+    ) -> CdcResult<Option<&mut ChunkLocation>>;
 
     /// 更新 chunk 的位置
     /// - 如果 chunk 已经存在，则更新其位置
@@ -47,14 +48,14 @@ pub trait ChunkBackend: ChunkWriterBackend + Send {
 
     /// 移除 chunk 的位置
     // fn _remove(&mut self, hash: &[u8; HASH_LENGTH]) -> CdcResult<()>;
-    fn gc(&mut self,keep_chunks_hash: HashSet<[u8; HASH_LENGTH]>) -> CdcResult<()>;
+    fn gc(&mut self, keep_chunks_hash: HashSet<[u8; HASH_LENGTH]>) -> CdcResult<()>;
 }
 
 #[derive(Clone, Debug)]
 pub struct ChunkLocation {
     pub pack_id: u32, // 属于哪个 pack 文件
-    pub offset: u32,     // 偏移量
-    pub len_idx: u16,     // 长度
+    pub offset: u32,  // 偏移量
+    pub len_idx: u16, // 长度
 }
 
 pub struct PendingCdcChunk<'a> {
@@ -64,7 +65,7 @@ pub struct PendingCdcChunk<'a> {
 
 enum ChunkWriterMessage {
     Write(ChunkLocation, Vec<u8>),
-    Sync
+    Sync,
 }
 
 impl ChunkLocation {
@@ -86,9 +87,18 @@ impl ChunkLocation {
 }
 
 mod chunk_writer {
-    use std::{fs::File, io::{BufWriter, Read, Seek, SeekFrom, Write}, path::PathBuf, sync::mpsc};
+    use crate::cdc::{
+        cdc_config::{BUFFER_SIZE, GLOBAL_LOCK, MAX_PACK_SIZE, PACKS_DIR},
+        cdc_error::{CdcError, CdcResult},
+        chunk_backend::{ChunkLocation, ChunkWriterBackend, ChunkWriterMessage},
+    };
     use memmap2::Mmap;
-    use crate::cdc::{cdc_config::{BUFFER_SIZE, GLOBAL_LOCK, MAX_PACK_SIZE, PACKS_DIR}, cdc_error::{CdcError, CdcResult}, chunk_backend::{ChunkLocation, ChunkWriterBackend, ChunkWriterMessage}};
+    use std::{
+        fs::File,
+        io::{BufWriter, Read, Seek, SeekFrom, Write},
+        path::PathBuf,
+        sync::mpsc,
+    };
 
     pub struct ChunkWriter {
         pub(crate) pack_id: u32,
@@ -96,7 +106,7 @@ mod chunk_writer {
         lock_file: File,
         store_path: PathBuf,
         send_tx: mpsc::SyncSender<ChunkWriterMessage>,
-        sync_recv: mpsc::Receiver<CdcResult<()>>
+        sync_recv: mpsc::Receiver<CdcResult<()>>,
     }
 
     impl ChunkWriter {
@@ -115,8 +125,7 @@ mod chunk_writer {
                 let pack_id = u32::from_be_bytes(bytes.get(0..4).unwrap().try_into().unwrap());
                 let current_size = u32::from_be_bytes(bytes.get(4..8).unwrap().try_into().unwrap());
                 (pack_id, current_size)
-            }
-            else {
+            } else {
                 (1, 0)
             };
 
@@ -124,7 +133,7 @@ mod chunk_writer {
             let (sync_tx, sync_recv) = mpsc::sync_channel(0);
 
             let store_path_ = store_path.join(PACKS_DIR);
-            std::thread::spawn( move || {
+            std::thread::spawn(move || {
                 if let Err(e) = Self::backend_write_chunk(store_path_, recv_tx, &sync_tx) {
                     sync_tx.send(Err(e)).ok();
                 }
@@ -158,7 +167,7 @@ mod chunk_writer {
             let pack_path = self.store_path.join(pack_id.to_string());
             std::fs::remove_file(pack_path).ok();
         }
-    
+
         #[inline]
         pub(crate) fn read_chunk_file_length(&self, pack_id: u32) -> CdcResult<u32> {
             let pack_path = self.store_path.join(pack_id.to_string());
@@ -174,7 +183,11 @@ mod chunk_writer {
             Ok(())
         }
 
-        fn backend_write_chunk(store_path: PathBuf, recv_tx: mpsc::Receiver<ChunkWriterMessage>, sync_tx: &mpsc::SyncSender<CdcResult<()>>) -> CdcResult<()> {
+        fn backend_write_chunk(
+            store_path: PathBuf,
+            recv_tx: mpsc::Receiver<ChunkWriterMessage>,
+            sync_tx: &mpsc::SyncSender<CdcResult<()>>,
+        ) -> CdcResult<()> {
             let mut current_pack_id = 0;
             let mut file_writer: Option<BufWriter<File>> = None;
             while let Ok(message) = recv_tx.recv() {
@@ -188,12 +201,16 @@ mod chunk_writer {
                             let pack_path = store_path.join(&current_pack_id.to_string());
                             let file_writer_ = BufWriter::with_capacity(
                                 BUFFER_SIZE,
-                                std::fs::OpenOptions::new().create(true).write(true).append(true).open(&pack_path)?
+                                std::fs::OpenOptions::new()
+                                    .create(true)
+                                    .write(true)
+                                    .append(true)
+                                    .open(&pack_path)?,
                             );
 
                             file_writer = Some(file_writer_);
                         }
-        
+
                         file_writer.as_mut().unwrap().write_all(&data)?;
                     }
                     ChunkWriterMessage::Sync => {
@@ -212,10 +229,11 @@ mod chunk_writer {
     impl ChunkWriterBackend for ChunkWriter {
         #[inline]
         fn write_chunk(&self, location: ChunkLocation, data: &[u8]) -> CdcResult<()> {
-            self.send_tx.send(ChunkWriterMessage::Write(location, data.to_vec()))
+            self.send_tx
+                .send(ChunkWriterMessage::Write(location, data.to_vec()))
                 .map_err(CdcError::from_channel_sender)
         }
-        
+
         #[inline]
         fn get_next_chunk_index(&mut self, data_len: usize) -> ChunkLocation {
             let location = ChunkLocation {
@@ -238,9 +256,10 @@ mod chunk_writer {
             let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
             Ok(mmap)
         }
-        
+
         fn sync_writer(&mut self) -> CdcResult<()> {
-            self.send_tx.send(ChunkWriterMessage::Sync)
+            self.send_tx
+                .send(ChunkWriterMessage::Sync)
                 .map_err(CdcError::from_channel_sender)?;
             self.sync_recv.recv()?
         }
@@ -358,13 +377,26 @@ mod chunk_writer {
 //     }
 // }
 
-
 pub mod hashmap_backend {
-    use std::{collections::{HashMap, HashSet}, fs::{self, File}, io::{BufReader, BufWriter, Read, Write}, path::PathBuf};
+    use std::{
+        collections::{HashMap, HashSet},
+        fs::{self, File},
+        io::{BufReader, BufWriter, Read, Write},
+        path::PathBuf,
+    };
 
+    use crate::cdc::{
+        cdc_config::{HASH_LENGTH, HASHMAP_INDEX_DIR, REPACK_THRESHOLD},
+        cdc_error::CdcResult,
+        chunk_backend::{
+            ChunkBackend, ChunkLocation, ChunkWriterBackend, chunk_writer::ChunkWriter,
+        },
+    };
     use memmap2::Mmap;
-    use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
-    use crate::cdc::{cdc_config::{HASH_LENGTH, HASHMAP_INDEX_DIR, REPACK_THRESHOLD}, cdc_error::CdcResult, chunk_backend::{ChunkBackend, ChunkLocation, ChunkWriterBackend, chunk_writer::ChunkWriter}};
+    use rayon::iter::{
+        IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
+        IntoParallelRefMutIterator, ParallelIterator,
+    };
 
     pub struct HashMapChunkBackend {
         index_buckets: Vec<HashMap<[u8; HASH_LENGTH], ChunkLocation>>,
@@ -380,10 +412,13 @@ pub mod hashmap_backend {
                 std::fs::create_dir_all(&index_dir)?;
             }
 
-            let index_buckets = (0..16).into_par_iter().map( |i| {
-                let bucket_path = index_dir.join(format!("{:02x}.idx", i));
-                Self::init_index_buckets(&bucket_path).unwrap_or_default()
-            }).collect();
+            let index_buckets = (0..16)
+                .into_par_iter()
+                .map(|i| {
+                    let bucket_path = index_dir.join(format!("{:02x}.idx", i));
+                    Self::init_index_buckets(&bucket_path).unwrap_or_default()
+                })
+                .collect();
 
             Ok(Self {
                 index_buckets: index_buckets,
@@ -391,8 +426,10 @@ pub mod hashmap_backend {
                 chunk_writer: chunk_writer,
             })
         }
-    
-        fn init_index_buckets(path: &PathBuf) -> CdcResult<HashMap<[u8; HASH_LENGTH], ChunkLocation>> {
+
+        fn init_index_buckets(
+            path: &PathBuf,
+        ) -> CdcResult<HashMap<[u8; HASH_LENGTH], ChunkLocation>> {
             if !path.exists() {
                 return Ok(HashMap::new());
             }
@@ -414,7 +451,7 @@ pub mod hashmap_backend {
                         key.copy_from_slice(&record[..HASH_LENGTH]);
                         value.copy_from_slice(&record[HASH_LENGTH..]);
                         map.insert(key, ChunkLocation::from_bytes(value));
-                    },
+                    }
                     Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                     Err(e) => return Err(e.into()),
                 }
@@ -422,24 +459,29 @@ pub mod hashmap_backend {
 
             Ok(map)
         }
-    
+
         #[inline]
         fn get_bucket_index(hash: &[u8; HASH_LENGTH]) -> usize {
             (hash[0] >> 4) as usize
         }
-    
+
         fn save_index_buckets(&mut self) -> CdcResult<()> {
-            let results: Vec<_> = self.index_buckets.par_iter().enumerate().map(|(i, bucket)| {
-                let bucket_path = self.index_dir.join(format!("{:02x}.idx", i));
-                let file = File::create(&bucket_path)?;
-                let mut writer = BufWriter::new(file);
-                for (key, value) in bucket.iter() {
-                    writer.write_all(key)?;
-                    writer.write_all(&value.to_bytes())?;
-                }
-                
-                writer.flush()
-            }).collect();
+            let results: Vec<_> = self
+                .index_buckets
+                .par_iter()
+                .enumerate()
+                .map(|(i, bucket)| {
+                    let bucket_path = self.index_dir.join(format!("{:02x}.idx", i));
+                    let file = File::create(&bucket_path)?;
+                    let mut writer = BufWriter::new(file);
+                    for (key, value) in bucket.iter() {
+                        writer.write_all(key)?;
+                        writer.write_all(&value.to_bytes())?;
+                    }
+
+                    writer.flush()
+                })
+                .collect();
 
             for result in results {
                 result?;
@@ -447,7 +489,11 @@ pub mod hashmap_backend {
             Ok(())
         }
 
-        fn rewrite_pack(chunk_writer: &mut ChunkWriter, pack_id: u32, locations: Vec<&mut ChunkLocation>) -> CdcResult<()> {
+        fn rewrite_pack(
+            chunk_writer: &mut ChunkWriter,
+            pack_id: u32,
+            locations: Vec<&mut ChunkLocation>,
+        ) -> CdcResult<()> {
             let pack_mmap = chunk_writer.read_chunk_file_mmap(pack_id)?;
             for location in locations {
                 let offset = location.offset as usize;
@@ -460,9 +506,7 @@ pub mod hashmap_backend {
             }
             Ok(())
         }
-    
     }
-
 
     impl ChunkWriterBackend for HashMapChunkBackend {
         #[inline]
@@ -497,7 +541,10 @@ pub mod hashmap_backend {
             Ok(self.index_buckets[bucket_index].get(hash))
         }
 
-        fn _read_index_mut(&mut self, hash: &[u8; HASH_LENGTH]) -> CdcResult<Option<&mut ChunkLocation>> {
+        fn _read_index_mut(
+            &mut self,
+            hash: &[u8; HASH_LENGTH],
+        ) -> CdcResult<Option<&mut ChunkLocation>> {
             let bucket_index = Self::get_bucket_index(hash);
             Ok(self.index_buckets[bucket_index].get_mut(hash))
         }
@@ -507,25 +554,34 @@ pub mod hashmap_backend {
             self.index_buckets[bucket_index].insert(*hash, location);
         }
 
-        fn gc(&mut self,keep_chunks_hash: HashSet<[u8; HASH_LENGTH]>) -> CdcResult<()> {
+        fn gc(&mut self, keep_chunks_hash: HashSet<[u8; HASH_LENGTH]>) -> CdcResult<()> {
             self.index_buckets.par_iter_mut().for_each(|bucket| {
                 bucket.retain(|hash, _location| keep_chunks_hash.contains(hash));
             });
 
-            let mut active_chunks: HashMap<u32, Vec<&mut ChunkLocation>> = self.index_buckets.par_iter_mut()
-            .flat_map(|bucket| {
-                bucket.par_iter_mut().map(|(_hash, location)| (location.pack_id, location))
-            })
-            .fold(|| HashMap::new(), |mut acc: HashMap<u32, Vec<&mut ChunkLocation>>, (pack_id, location)| {
-                acc.entry(pack_id).or_insert_with(Vec::new).push(location);
-                acc
-            })
-            .reduce(HashMap::new, |mut acc, map| {
-                for (pack_id, mut locations) in map {
-                    acc.entry(pack_id).or_insert_with(Vec::new).append(&mut locations);
-                }
-                acc
-            });
+            let mut active_chunks: HashMap<u32, Vec<&mut ChunkLocation>> = self
+                .index_buckets
+                .par_iter_mut()
+                .flat_map(|bucket| {
+                    bucket
+                        .par_iter_mut()
+                        .map(|(_hash, location)| (location.pack_id, location))
+                })
+                .fold(
+                    || HashMap::new(),
+                    |mut acc: HashMap<u32, Vec<&mut ChunkLocation>>, (pack_id, location)| {
+                        acc.entry(pack_id).or_insert_with(Vec::new).push(location);
+                        acc
+                    },
+                )
+                .reduce(HashMap::new, |mut acc, map| {
+                    for (pack_id, mut locations) in map {
+                        acc.entry(pack_id)
+                            .or_insert_with(Vec::new)
+                            .append(&mut locations);
+                    }
+                    acc
+                });
 
             // 先检查当前的 pack 文件是否要重写
             let mut keep_pack_ids = HashSet::new();
@@ -533,29 +589,32 @@ pub mod hashmap_backend {
             let chunk_writer = &mut self.chunk_writer;
 
             if let Some(locations) = active_chunks.remove(&current_pack_id) {
-                let length_sum = locations.par_iter().map(|location| location.len_idx as u32).sum::<u32>();
+                let length_sum = locations
+                    .par_iter()
+                    .map(|location| location.len_idx as u32)
+                    .sum::<u32>();
                 let current_pack_length = chunk_writer.read_chunk_file_length(current_pack_id)?;
                 if current_pack_length - length_sum > REPACK_THRESHOLD {
                     chunk_writer.switch_new_pack();
                     Self::rewrite_pack(chunk_writer, current_pack_id, locations)?;
-                }
-                else {
+                } else {
                     // 当前这个 pack 有活跃数据，但是长度小于阈值，则保留
                     keep_pack_ids.insert(current_pack_id);
                 }
-            }
-            else {
+            } else {
                 // 当前这个 pack 没有活跃数据，切换到新的并且准备删除
                 chunk_writer.switch_new_pack();
             }
 
             for (pack_id, locations) in active_chunks {
-                let length_sum = locations.par_iter().map(|location| location.len_idx as u32).sum::<u32>();
+                let length_sum = locations
+                    .par_iter()
+                    .map(|location| location.len_idx as u32)
+                    .sum::<u32>();
                 let current_pack_length = chunk_writer.read_chunk_file_length(pack_id)?;
                 if current_pack_length - length_sum > REPACK_THRESHOLD {
                     Self::rewrite_pack(chunk_writer, pack_id, locations)?;
-                }
-                else {
+                } else {
                     keep_pack_ids.insert(pack_id);
                 }
             }
@@ -579,8 +638,3 @@ pub mod hashmap_backend {
         }
     }
 }
-
-
-
-
-

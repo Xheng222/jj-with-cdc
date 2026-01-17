@@ -98,7 +98,21 @@ fn test_git_init_internal() {
 }
 
 #[test]
-fn test_git_init_internal_ignore_working_copy() {
+fn test_git_init_internal_preexisting_git_repo() {
+    let test_env = TestEnvironment::default();
+    test_env.work_dir("").create_dir_all("repo/.git");
+    let output = test_env.run_jj_in(".", ["git", "init", "repo"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Error: Did not create a jj repo because there is an existing Git repo in this directory.
+    Hint: To create a repo backed by the existing Git repo, run `jj git init --colocate` instead.
+    [EOF]
+    [exit status: 1]
+    ");
+}
+
+#[test]
+fn test_git_init_ignore_working_copy() {
     let test_env = TestEnvironment::default();
     let work_dir = test_env.work_dir("").create_dir("repo");
     work_dir.write_file("file1", "");
@@ -113,7 +127,7 @@ fn test_git_init_internal_ignore_working_copy() {
 }
 
 #[test]
-fn test_git_init_internal_at_operation() {
+fn test_git_init_at_operation() {
     let test_env = TestEnvironment::default();
     let work_dir = test_env.work_dir("").create_dir("repo");
 
@@ -293,6 +307,7 @@ fn test_git_init_external_import_trunk_upstream_takes_precedence() {
         "refs/remotes/origin/trunk",
     );
 
+    // also accepts full .git path
     let output = test_env.run_jj_in(
         ".",
         [
@@ -300,7 +315,7 @@ fn test_git_init_external_import_trunk_upstream_takes_precedence() {
             "init",
             "repo",
             "--git-repo",
-            git_repo_path.to_str().unwrap(),
+            git_repo_path.join(".git").to_str().unwrap(),
         ],
     );
     insta::allow_duplicates! {
@@ -325,52 +340,6 @@ fn test_git_init_external_import_trunk_upstream_takes_precedence() {
         [EOF]
         "#);
     }
-}
-
-#[test]
-fn test_git_init_external_ignore_working_copy() {
-    let test_env = TestEnvironment::default();
-    let git_repo_path = test_env.env_root().join("git-repo");
-    init_git_repo(&git_repo_path, false);
-    let work_dir = test_env.work_dir("").create_dir("repo");
-    work_dir.write_file("file1", "");
-
-    // No snapshot should be taken
-    let output = work_dir.run_jj([
-        "git",
-        "init",
-        "--ignore-working-copy",
-        "--git-repo",
-        git_repo_path.to_str().unwrap(),
-    ]);
-    insta::assert_snapshot!(output, @r"
-    ------- stderr -------
-    Error: --ignore-working-copy is not respected
-    [EOF]
-    [exit status: 2]
-    ");
-}
-
-#[test]
-fn test_git_init_external_at_operation() {
-    let test_env = TestEnvironment::default();
-    let git_repo_path = test_env.env_root().join("git-repo");
-    init_git_repo(&git_repo_path, false);
-    let work_dir = test_env.work_dir("").create_dir("repo");
-
-    let output = work_dir.run_jj([
-        "git",
-        "init",
-        "--at-op=@-",
-        "--git-repo",
-        git_repo_path.to_str().unwrap(),
-    ]);
-    insta::assert_snapshot!(output, @r"
-    ------- stderr -------
-    Error: --at-op is not respected
-    [EOF]
-    [exit status: 2]
-    ");
 }
 
 #[test]
@@ -847,37 +816,6 @@ fn test_git_init_colocated_dirty_working_copy() {
 }
 
 #[test]
-fn test_git_init_colocated_ignore_working_copy() {
-    let test_env = TestEnvironment::default();
-    let work_dir = test_env.work_dir("repo");
-    init_git_repo(work_dir.root(), false);
-    work_dir.write_file("file1", "");
-
-    let output = work_dir.run_jj(["git", "init", "--ignore-working-copy", "--colocate"]);
-    insta::assert_snapshot!(output, @r"
-    ------- stderr -------
-    Error: --ignore-working-copy is not respected
-    [EOF]
-    [exit status: 2]
-    ");
-}
-
-#[test]
-fn test_git_init_colocated_at_operation() {
-    let test_env = TestEnvironment::default();
-    let work_dir = test_env.work_dir("repo");
-    init_git_repo(work_dir.root(), false);
-
-    let output = work_dir.run_jj(["git", "init", "--at-op=@-", "--colocate"]);
-    insta::assert_snapshot!(output, @r"
-    ------- stderr -------
-    Error: --at-op is not respected
-    [EOF]
-    [exit status: 2]
-    ");
-}
-
-#[test]
 fn test_git_init_external_but_git_dir_exists() {
     let test_env = TestEnvironment::default();
     let git_repo_path = test_env.env_root().join("git-repo");
@@ -1144,4 +1082,80 @@ fn test_git_init_bad_wc_path() {
     [EOF]
     [exit status: 1]
     ");
+}
+
+#[test]
+fn test_git_init_colocate_in_git_worktree() {
+    let test_env = TestEnvironment::default();
+    let main_repo_path = test_env.env_root().join("main-repo");
+    init_git_repo(&main_repo_path, false);
+
+    // Create a Git worktree
+    let worktree_path = test_env.env_root().join("worktree");
+    let status = std::process::Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            worktree_path.to_str().unwrap(),
+            "-b",
+            "worktree-branch",
+        ])
+        .current_dir(&main_repo_path)
+        .status()
+        .expect("git worktree add failed to spawn");
+    assert!(status.success(), "git worktree add failed: {status}");
+
+    // Verify .git is a file (gitlink)
+    assert!(worktree_path.join(".git").is_file());
+
+    // Try to init colocated jj repo - should fail
+    let output = test_env.run_jj_in(
+        worktree_path.to_str().unwrap(),
+        ["git", "init", "--colocate"],
+    );
+    insta::assert_snapshot!(output, @r"
+    ------- stderr -------
+    Error: Cannot create a colocated jj repo inside a Git worktree.
+    Hint: Run `jj git init` in the main Git repository instead, or use `jj workspace add` to create additional jj workspaces.
+    [EOF]
+    [exit status: 1]
+    ");
+
+    // Verify no .jj directory was created
+    assert!(!worktree_path.join(".jj").exists());
+}
+
+#[test]
+fn test_git_init_colocate_gitlink_not_worktree() {
+    // Test that a gitlink pointing to a path that contains "worktrees" in a
+    // user directory (NOT in the .git/worktrees/<name> pattern) is NOT
+    // incorrectly detected as a Git worktree
+    let test_env = TestEnvironment::default();
+
+    // Create a bare git repo at a path containing "worktrees" as a directory name
+    let git_repo_path = test_env.env_root().join("worktrees").join("my-repo.git");
+    std::fs::create_dir_all(&git_repo_path).unwrap();
+    init_git_repo(&git_repo_path, true);
+
+    // Create a working directory with a gitlink pointing to that bare repo
+    let work_dir = test_env.env_root().join("work");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    let gitlink_content = format!("gitdir: {}", git_repo_path.to_str().unwrap());
+    std::fs::write(work_dir.join(".git"), gitlink_content).unwrap();
+
+    // Verify .git is a file (gitlink)
+    assert!(work_dir.join(".git").is_file());
+
+    // jj git init --colocate should succeed (not be blocked as a worktree)
+    let output = test_env.run_jj_in(work_dir.to_str().unwrap(), ["git", "init", "--colocate"]);
+    insta::assert_snapshot!(output, @r#"
+    ------- stderr -------
+    Done importing changes from the underlying Git repo.
+    Initialized repo in "."
+    Hint: Running `git clean -xdf` will remove `.jj/`!
+    [EOF]
+    "#);
+
+    // Verify .jj directory was created
+    assert!(work_dir.join(".jj").exists());
 }

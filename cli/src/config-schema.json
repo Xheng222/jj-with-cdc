@@ -76,11 +76,6 @@
                 }
             },
             "properties": {
-                "always-allow-large-revsets": {
-                    "type": "boolean",
-                    "description": "Whether to allow large revsets to be used in all commands without the `all:` modifier",
-                    "default": true
-                },
                 "default-command": {
                     "description": "Default command to run when no explicit command is given",
                     "default": "log",
@@ -522,6 +517,11 @@
                         "type": "string",
                         "description": "A string pattern describing the bookmarks to automatically track with this remote. It will be applied to any new bookmark, created or fetched. See https://docs.jj-vcs.dev/latest/config/#automatic-tracking-of-bookmarks",
                         "default": "~*"
+                    },
+                    "auto-track-created-bookmarks": {
+                        "type": "string",
+                        "description": "A string pattern describing the locally-created bookmarks which should track this remote automatically. It will be applied to new bookmarks created with `jj bookmark create` or `jj bookmark set`. See https://docs.jj-vcs.dev/latest/config/#automatic-tracking-of-bookmarks",
+                        "default": "~*"
                     }
                 }
             }
@@ -643,7 +643,7 @@
                 "log": {
                     "type": "string",
                     "description": "Default set of revisions to show when no explicit revset is given for jj log and similar commands",
-                    "default": "present(@) | ancestors(immutable_heads().., 2) | present(trunk())"
+                    "default": "present(@) | ancestors(immutable_heads().., 2) | trunk()"
                 },
                 "short-prefixes": {
                     "type": "string",
@@ -677,7 +677,7 @@
                 "immutable_heads()": {
                     "type": "string",
                     "description": "Revisions to consider immutable. Ancestors of these are also considered immutable. The root commit is always considered immutable.",
-                    "default": "present(trunk()) | tags() | untracked_remote_bookmarks()"
+                    "default": "trunk() | tags() | untracked_remote_bookmarks()"
                 }
             },
             "additionalProperties": {

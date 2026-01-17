@@ -8,6 +8,87 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Release highlights
+
+* Per-repo and per-workspace config is now stored outside the repo, for security
+  reasons. This is not a breaking change because we automatically migrate
+  legacy repos to this new format. `.jj/repo/config.toml` and
+  `.jj/workspace-config.toml` should no longer be used.
+
+### Breaking changes
+
+* Deprecated `ui.always-allow-large-revsets` setting and `all:` revset modifier
+  have been removed.
+
+### Deprecations
+
+* The revset function `diff_contains()` has been renamed to `diff_lines()`.
+
+### New features
+
+* `jj git fetch` now shows details of abandoned commits (change IDs and
+  descriptions) by default, matching the `jj abandon` output format.
+  [#3081](https://github.com/jj-vcs/jj/issues/3081)
+
+* `jj git push --bookmark <name>` will now automatically track the bookmark if
+  it isn't tracked with any remote already.
+
+* Add `git_web_url([remote])` template function that converts a git remote URL
+  to a web URL, suitable for opening in a browser. Defaults to the "origin"
+  remote.
+
+* New `divergent()` revset function for divergent changes.
+
+* A new config option `remotes.<name>.auto-track-created-bookmarks` behaves
+  similarly to `auto-track-bookmarks`, but it only applies to bookmarks created
+  locally. Setting it to `"*"` is now the closest replacement for the deprecated
+  `git.push-new-bookmarks` option.
+
+* `jj tag list` can now be filtered by revset.
+
+### Fixed bugs
+
+* `jj git init --colocate` now refuses to run inside a Git worktree, providing
+  a helpful error message with alternatives.
+  [#8052](https://github.com/jj-vcs/jj/issues/8052)
+
+* `jj git push` now ensures that tracked remote bookmarks are updated even if
+  there are no mappings in the Git fetch refspecs.
+  [#5115](https://github.com/jj-vcs/jj/issues/5115)
+
+* Conflicted bookmarks and tags in `trunk()` will no longer generate verbose
+  warnings. The configured `trunk()` alias will temporarily be disabled.
+  [#8501](https://github.com/jj-vcs/jj/issues/8501)
+
+* Dynamic shell completion for `jj config unset` now only completes
+  configuration options which are set.
+  [#7774](https://github.com/jj-vcs/jj/issues/7774)
+
+* Setting the editor via `ui.editor`, `$EDITOR`, or `JJ_EDITOR` now respects shell quoting.
+
+* `jj gerrit upload` will no longer swallow errors and surface if changes fail
+  to get pushed to gerrit.
+  [#8568](https://github.com/jj-vcs/jj/issues/8568)
+
+* `jj file track --include-ignored` now works when `fsmonitor.backend="watchman"`.
+  [#8427](https://github.com/jj-vcs/jj/issues/8427)
+
+* Conflict labels are now preserved correctly when restoring files from commits
+  with different conflict labels.
+
+## [0.37.0] - 2026-01-07
+
+### Release highlights
+
+* A new syntax for referring to hidden and divergent change IDs is available:
+  `xyz/n` where `n` is a number. For instance, `xyz/0` refers to the latest
+  version of `xyz`, while `xyz/1` refers to the previous version of `xyz`.
+  This allows you to perform actions like `jj restore --from xyz/1 --to xyz` to
+  restore `xyz` to its previous contents, if you made a mistake.
+
+  For divergent changes, the numeric suffix will always be shown in the log,
+  allowing you to disambiguate them in a similar manner.
+
 ### Breaking changes
 
 * [String patterns](docs/revsets.md#string-patterns) in revsets, command
@@ -23,12 +104,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   --remote=<remote>`.
 
 * On Windows, symlinks that point to a path with `/` won't be supported. This
-  path is [invalid on Windows].
+  path is [invalid on Windows](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file#naming-conventions).
 
 * The template alias `format_short_change_id_with_hidden_and_divergent_info(commit)`
   has been replaced by `format_short_change_id_with_change_offset(commit)`.
-
-[invalid on Windows]: https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file#naming-conventions
 
 * The following deprecated config options have been removed:
   - `git.push-bookmark-prefix`
@@ -128,6 +207,41 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 * Fixed checkout of symlinks pointing to themselves or `.git`/`.jj` on Unix. The
   problem would still remain on Windows if symlinks are enabled.
   [#8348](https://github.com/jj-vcs/jj/issues/8348)
+
+* Fixed a bug where jj would fail to read git delta objects from pack files.
+  https://github.com/GitoxideLabs/gitoxide/issues/2344
+
+### Contributors
+
+Thanks to the people who made this release happen!
+
+* Anton Älgmyr (@algmyr)
+* Austin Seipp (@thoughtpolice)
+* Bryce Berger (@bryceberger)
+* Carlos Knippschild (@chuim)
+* Cole Helbling (@cole-h)
+* David Higgs (@higgsd)
+* Eekle (@Eekle)
+* Gaëtan Lehmann (@glehmann)
+* Ian Wrzesinski (@isuffix)
+* Ilya Grigoriev (@ilyagr)
+* Julian Howes (@jlnhws)
+* Kaiyi Li (@06393993)
+* Lukas Krejci (@metlos)
+* Martin von Zweigbergk (@martinvonz)
+* Matt Stark (@matts1)
+* Ori Avtalion (@salty-horse)
+* Scott Taylor (@scott2000)
+* Shaoxuan (Max) Yuan (@ffyuanda)
+* Stephen Jennings (@jennings)
+* Steve Fink (@hotsphink)
+* Steve Klabnik (@steveklabnik)
+* Theo Buehler (@botovq)
+* Thomas Castiglione (@gulbanana)
+* Vincent Ging Ho Yim (@cenviity)
+* xtqqczze (@xtqqczze)
+* Yuantao Wang (@0WD0)
+* Yuya Nishihara (@yuja)
 
 ## [0.36.0] - 2025-12-03
 
@@ -644,7 +758,7 @@ Thanks to the people who made this release happen!
   (it only undid the last change).
 
 * `jj git fetch` will now only fetch the refspec patterns configured on remotes
-  when the `--bookmark` option is omitted. Only simple refspec patterns are
+  when the `--branch` option is omitted. Only simple refspec patterns are
   currently supported, and anything else (like refspecs which rename branches)
   will be ignored.
 
@@ -4493,7 +4607,8 @@ No changes, only trying to get the automated build to work.
 
 Last release before this changelog started.
 
-[unreleased]: https://github.com/jj-vcs/jj/compare/v0.36.0...HEAD
+[unreleased]: https://github.com/jj-vcs/jj/compare/v0.37.0...HEAD
+[0.37.0]: https://github.com/jj-vcs/jj/compare/v0.36.0...v0.37.0
 [0.36.0]: https://github.com/jj-vcs/jj/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/jj-vcs/jj/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/jj-vcs/jj/compare/v0.33.0...v0.34.0

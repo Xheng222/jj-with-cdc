@@ -111,7 +111,6 @@ use jj_lib::revset::RevsetExtensions;
 use jj_lib::revset::RevsetFilterPredicate;
 use jj_lib::revset::RevsetFunction;
 use jj_lib::revset::RevsetIteratorExt as _;
-use jj_lib::revset::RevsetModifier;
 use jj_lib::revset::RevsetParseContext;
 use jj_lib::revset::RevsetWorkspaceContext;
 use jj_lib::revset::SymbolResolverExtension;
@@ -153,6 +152,7 @@ use crate::command_error::config_error_with_message;
 use crate::command_error::handle_command_result;
 use crate::command_error::internal_error;
 use crate::command_error::internal_error_with_message;
+use crate::command_error::print_error_sources;
 use crate::command_error::print_parse_diagnostics;
 use crate::command_error::user_error;
 use crate::command_error::user_error_with_hint;
@@ -354,7 +354,7 @@ impl CommandHelper {
     ///
     /// This may be different from the settings for new workspace created by
     /// e.g. `jj git init`. There may be conditional variables and repo config
-    /// `.jj/repo/config.toml` loaded for the cwd workspace.
+    /// loaded for the cwd workspace.
     pub fn settings(&self) -> &UserSettings {
         &self.data.settings
     }
@@ -362,19 +362,20 @@ impl CommandHelper {
     /// Resolves configuration for new workspace located at the specified path.
     pub fn settings_for_new_workspace(
         &self,
+        ui: &Ui,
         workspace_root: &Path,
-    ) -> Result<UserSettings, CommandError> {
+    ) -> Result<(UserSettings, ConfigEnv), CommandError> {
         let mut config_env = self.data.config_env.clone();
         let mut raw_config = self.data.raw_config.clone();
         let repo_path = workspace_root.join(".jj").join("repo");
         config_env.reset_repo_path(&repo_path);
-        config_env.reload_repo_config(&mut raw_config)?;
+        config_env.reload_repo_config(ui, &mut raw_config)?;
         config_env.reset_workspace_path(workspace_root);
-        config_env.reload_workspace_config(&mut raw_config)?;
+        config_env.reload_workspace_config(ui, &mut raw_config)?;
         let mut config = config_env.resolve_config(&raw_config)?;
         // No migration messages here, which would usually be emitted before.
         jj_lib::config::migrate(&mut config, &self.data.config_migrations)?;
-        Ok(self.data.settings.with_new_config(config)?)
+        Ok((self.data.settings.with_new_config(config)?, config_env))
     }
 
     /// Loads text editor from the settings.
@@ -478,8 +479,30 @@ impl CommandHelper {
         let workspace = self.load_workspace()?;
         let op_head = self.resolve_operation(ui, workspace.repo_loader())?;
         let repo = workspace.repo_loader().load_at(&op_head)?;
-        let env = self.workspace_environment(ui, &workspace)?;
-        revset_util::warn_unresolvable_trunk(ui, repo.as_ref(), &env.revset_parse_context())?;
+        let mut env = self.workspace_environment(ui, &workspace)?;
+        if let Err(err) =
+            revset_util::try_resolve_trunk_alias(repo.as_ref(), &env.revset_parse_context())
+        {
+            // The fallback can be builtin_trunk() if we're willing to support
+            // inferred trunk forever. (#7990)
+            let fallback = "root()";
+            writeln!(
+                ui.warning_default(),
+                "Failed to resolve `revset-aliases.trunk()`: {err}"
+            )?;
+            writeln!(
+                ui.warning_no_heading(),
+                "The `trunk()` alias is temporarily set to `{fallback}`."
+            )?;
+            writeln!(
+                ui.hint_default(),
+                "Use `jj config edit --repo` to adjust the `trunk()` alias."
+            )?;
+            env.revset_aliases_map
+                .insert("trunk()", fallback)
+                .expect("valid syntax");
+            env.reload_revset_expressions(ui)?;
+        }
         WorkspaceCommandHelper::new(ui, workspace, repo, env, self.is_at_head_operation())
     }
 
@@ -813,8 +836,7 @@ impl WorkspaceCommandEnvironment {
             short_prefixes_expression: None,
             conflict_marker_style: settings.get("ui.conflict-marker-style")?,
         };
-        env.immutable_heads_expression = env.load_immutable_heads_expression(ui)?;
-        env.short_prefixes_expression = env.load_short_prefixes_expression(ui)?;
+        env.reload_revset_expressions(ui)?;
         Ok(env)
     }
 
@@ -858,6 +880,13 @@ impl WorkspaceCommandEnvironment {
             None => context,
             Some(expression) => context.disambiguate_within(expression.clone()),
         }
+    }
+
+    /// Updates parsed revset expressions.
+    fn reload_revset_expressions(&mut self, ui: &Ui) -> Result<(), CommandError> {
+        self.immutable_heads_expression = self.load_immutable_heads_expression(ui)?;
+        self.short_prefixes_expression = self.load_short_prefixes_expression(ui)?;
+        Ok(())
     }
 
     /// User-configured expression defining the immutable set.
@@ -904,14 +933,13 @@ impl WorkspaceCommandEnvironment {
             Ok(None)
         } else {
             let mut diagnostics = RevsetDiagnostics::new();
-            let (expression, modifier) = revset::parse_with_modifier(
+            let expression = revset::parse(
                 &mut diagnostics,
                 &revset_string,
                 &self.revset_parse_context(),
             )
             .map_err(|err| config_error_with_message("Invalid `revsets.short-prefixes`", err))?;
             print_parse_diagnostics(ui, "In `revsets.short-prefixes`", &diagnostics)?;
-            let (None | Some(RevsetModifier::All)) = modifier;
             Ok(Some(expression))
         }
     }
@@ -1253,7 +1281,7 @@ impl WorkspaceCommandHelper {
             crate::git_util::load_git_import_options(ui, &git_settings, &remote_settings)?;
         let mut tx = self.start_transaction();
         let stats = git::import_refs(tx.repo_mut(), &import_options)?;
-        crate::git_util::print_git_import_stats(ui, tx.repo(), &stats, false)?;
+        crate::git_util::print_git_import_stats_summary(ui, &stats)?;
         if !tx.repo().has_changes() {
             return Ok(());
         }
@@ -1471,17 +1499,17 @@ to the current parents may contain changes from multiple commits.
                 // the "git" command would read the file at the work-tree directory.
                 Some(self.workspace_root().join(path))
             } else {
-                xdg_config_home().ok().map(|x| x.join("git").join("ignore"))
+                xdg_config_home().map(|x| x.join("git").join("ignore"))
             }
         };
 
-        fn xdg_config_home() -> Result<PathBuf, std::env::VarError> {
+        fn xdg_config_home() -> Option<PathBuf> {
             if let Ok(x) = std::env::var("XDG_CONFIG_HOME")
                 && !x.is_empty()
             {
-                return Ok(PathBuf::from(x));
+                return Some(PathBuf::from(x));
             }
-            std::env::var("HOME").map(|x| Path::new(&x).join(".config"))
+            etcetera::home_dir().ok().map(|home| home.join(".config"))
         }
 
         let mut git_ignores = GitIgnoreFile::empty();
@@ -1631,27 +1659,9 @@ to the current parents may contain changes from multiple commits.
     ) -> Result<IndexSet<CommitId>, CommandError> {
         let mut all_commits = IndexSet::new();
         for revision_arg in revision_args {
-            let (expression, modifier) = self.parse_revset_with_modifier(ui, revision_arg)?;
-            let all = match modifier {
-                Some(RevsetModifier::All) => true,
-                None => self.settings().get_bool("ui.always-allow-large-revsets")?,
-            };
-            if all {
-                for commit_id in expression.evaluate_to_commit_ids()? {
-                    all_commits.insert(commit_id?);
-                }
-            } else {
-                let commit = revset_util::evaluate_revset_to_single_commit(
-                    revision_arg.as_ref(),
-                    &expression,
-                    || self.commit_summary_template(),
-                )?;
-                if !all_commits.insert(commit.id().clone()) {
-                    let commit_hash = short_commit_hash(commit.id());
-                    return Err(user_error(format!(
-                        r#"More than one revset resolved to revision {commit_hash}"#,
-                    )));
-                }
+            let expression = self.parse_revset(ui, revision_arg)?;
+            for commit_id in expression.evaluate_to_commit_ids()? {
+                all_commits.insert(commit_id?);
             }
         }
         Ok(all_commits)
@@ -1677,24 +1687,11 @@ to the current parents may contain changes from multiple commits.
         ui: &Ui,
         revision_arg: &RevisionArg,
     ) -> Result<RevsetExpressionEvaluator<'_>, CommandError> {
-        let (expression, modifier) = self.parse_revset_with_modifier(ui, revision_arg)?;
-        // Whether the caller accepts multiple revisions or not, "all:" should
-        // be valid. For example, "all:@" is a valid single-rev expression.
-        let (None | Some(RevsetModifier::All)) = modifier;
-        Ok(expression)
-    }
-
-    fn parse_revset_with_modifier(
-        &self,
-        ui: &Ui,
-        revision_arg: &RevisionArg,
-    ) -> Result<(RevsetExpressionEvaluator<'_>, Option<RevsetModifier>), CommandError> {
         let mut diagnostics = RevsetDiagnostics::new();
         let context = self.env.revset_parse_context();
-        let (expression, modifier) =
-            revset::parse_with_modifier(&mut diagnostics, revision_arg.as_ref(), &context)?;
+        let expression = revset::parse(&mut diagnostics, revision_arg.as_ref(), &context)?;
         print_parse_diagnostics(ui, "In revset expression", &diagnostics)?;
-        Ok((self.attach_revset_evaluator(expression), modifier))
+        Ok(self.attach_revset_evaluator(expression))
     }
 
     /// Parses the given revset expressions and concatenates them all.
@@ -1707,8 +1704,7 @@ to the current parents may contain changes from multiple commits.
         let context = self.env.revset_parse_context();
         let expressions: Vec<_> = revision_args
             .iter()
-            .map(|arg| revset::parse_with_modifier(&mut diagnostics, arg.as_ref(), &context))
-            .map_ok(|(expression, None | Some(RevsetModifier::All))| expression)
+            .map(|arg| revset::parse(&mut diagnostics, arg.as_ref(), &context))
             .try_collect()?;
         print_parse_diagnostics(ui, "In revset expression", &diagnostics)?;
         let expression = RevsetExpression::union_all(&expressions);
@@ -2062,11 +2058,23 @@ to the current parents may contain changes from multiple commits.
         }
 
         for (name, wc_commit_id) in &tx.repo().view().wc_commit_ids().clone() {
-            if self
-                .env
-                .find_immutable_commit(tx.repo(), &RevsetExpression::commit(wc_commit_id.clone()))?
-                .is_some()
-            {
+            // This can fail if trunk() bookmark gets deleted or conflicted. If
+            // the unresolvable trunk() issue gets addressed differently, it
+            // should be okay to propagate the error.
+            let wc_expr = RevsetExpression::commit(wc_commit_id.clone());
+            let is_immutable = match self.env.find_immutable_commit(tx.repo(), &wc_expr) {
+                Ok(commit_id) => commit_id.is_some(),
+                Err(CommandError { error, .. }) => {
+                    writeln!(
+                        ui.warning_default(),
+                        "Failed to check mutability of the new working-copy revision."
+                    )?;
+                    print_error_sources(ui, Some(&error))?;
+                    // Give up because the same error would occur repeatedly.
+                    break;
+                }
+            };
+            if is_immutable {
                 let wc_commit = tx.repo().store().get_commit(wc_commit_id)?;
                 tx.repo_mut().check_out(name.clone(), &wc_commit)?;
                 writeln!(
@@ -2076,6 +2084,21 @@ to the current parents may contain changes from multiple commits.
                     name = name.as_symbol()
                 )?;
             }
+        }
+        if let Err(err) =
+            revset_util::try_resolve_trunk_alias(tx.repo(), &self.env.revset_parse_context())
+        {
+            // The warning would be printed above if working copies exist.
+            if tx.repo().view().wc_commit_ids().is_empty() {
+                writeln!(
+                    ui.warning_default(),
+                    "Failed to resolve `revset-aliases.trunk()`: {err}"
+                )?;
+            }
+            writeln!(
+                ui.hint_default(),
+                "Use `jj config edit --repo` to adjust the `trunk()` alias."
+            )?;
         }
 
         let old_repo = tx.base_repo().clone();
@@ -2106,7 +2129,7 @@ to the current parents may contain changes from multiple commits.
                     Ok(()) => {}
                     Err(err @ jj_lib::git::GitResetHeadError::UpdateHeadRef(_)) => {
                         writeln!(ui.warning_default(), "{err}")?;
-                        crate::command_error::print_error_sources(ui, err.source())?;
+                        print_error_sources(ui, err.source())?;
                     }
                     Err(err) => return Err(err.into()),
                 }
@@ -2269,7 +2292,6 @@ to the current parents may contain changes from multiple commits.
                     .collect(),
             )?;
         }
-        revset_util::warn_unresolvable_trunk(ui, new_repo, &self.env.revset_parse_context())?;
 
         Ok(())
     }
@@ -2649,14 +2671,21 @@ See https://docs.jj-vcs.dev/latest/working-copy/#stale-working-copy \
                  for more information.",
             )),
         ),
-        Ok(WorkingCopyFreshness::SiblingOperation) => Err(
-            SnapshotWorkingCopyError::StaleWorkingCopy(internal_error(format!(
-                "The repo was loaded at operation {}, which seems to be a sibling of the working \
-                 copy's operation {}",
-                short_operation_hash(repo.op_id()),
-                short_operation_hash(&old_op_id)
-            ))),
-        ),
+        Ok(WorkingCopyFreshness::SiblingOperation) => {
+            Err(SnapshotWorkingCopyError::StaleWorkingCopy(
+                internal_error(format!(
+                    "The repo was loaded at operation {}, which seems to be a sibling of the \
+                     working copy's operation {}",
+                    short_operation_hash(repo.op_id()),
+                    short_operation_hash(&old_op_id)
+                ))
+                .hinted(format!(
+                    "Run `jj op integrate {}` to add the working copy's operation to the \
+                     operation log.",
+                    short_operation_hash(&old_op_id)
+                )),
+            ))
+        }
         Err(OpStoreError::ObjectNotFound { .. }) => Err(
             SnapshotWorkingCopyError::StaleWorkingCopy(user_error_with_hint(
                 "Could not read working copy's operation.",
@@ -3102,10 +3131,18 @@ impl DiffSelector {
     pub fn select(
         &self,
         trees: Diff<&MergedTree>,
+        tree_labels: Diff<String>,
         matcher: &dyn Matcher,
         format_instructions: impl FnOnce() -> String,
     ) -> Result<MergedTree, CommandError> {
-        let selected_tree = restore_tree(trees.after, trees.before, matcher).block_on()?;
+        let selected_tree = restore_tree(
+            trees.after,
+            trees.before,
+            tree_labels.after,
+            tree_labels.before,
+            matcher,
+        )
+        .block_on()?;
         match self {
             Self::NonInteractive => Ok(selected_tree),
             Self::Interactive(editor) => {
@@ -3985,9 +4022,9 @@ impl<'a> CliRunner<'a> {
         config_env.reload_user_config(&mut raw_config)?;
         if let Ok(loader) = &maybe_cwd_workspace_loader {
             config_env.reset_repo_path(loader.repo_path());
-            config_env.reload_repo_config(&mut raw_config)?;
+            config_env.reload_repo_config(ui, &mut raw_config)?;
             config_env.reset_workspace_path(loader.workspace_root());
-            config_env.reload_workspace_config(&mut raw_config)?;
+            config_env.reload_workspace_config(ui, &mut raw_config)?;
         }
         let mut config = config_env.resolve_config(&raw_config)?;
         migrate_config(&mut config)?;
@@ -4031,9 +4068,9 @@ impl<'a> CliRunner<'a> {
                 .create(&abs_path)
                 .map_err(|err| map_workspace_load_error(err, Some(path)))?;
             config_env.reset_repo_path(loader.repo_path());
-            config_env.reload_repo_config(&mut raw_config)?;
+            config_env.reload_repo_config(ui, &mut raw_config)?;
             config_env.reset_workspace_path(loader.workspace_root());
-            config_env.reload_workspace_config(&mut raw_config)?;
+            config_env.reload_workspace_config(ui, &mut raw_config)?;
             Ok(loader)
         } else {
             maybe_cwd_workspace_loader

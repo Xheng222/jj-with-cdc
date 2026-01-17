@@ -43,6 +43,7 @@ digest = { workspace = true }
 dunce = { workspace = true }
 either = { workspace = true }
 fastcdc = "3.2.1"
+etcetera = { workspace = true }
 futures = { workspace = true }
 gix = { workspace = true, optional = true }
 globset = { workspace = true }

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use indoc::indoc;
 use testutils::git;
 
 use crate::common::CommandOutput;
@@ -1383,7 +1384,7 @@ fn test_git_push_mixed() {
         .success();
     work_dir.write_file("file", "modified again");
 
-    // --allow-new is not implied for --bookmark=.. and -r=..
+    // --allow-new is not implied for -r=..
     let output = work_dir.run_jj([
         "git",
         "push",
@@ -1394,10 +1395,14 @@ fn test_git_push_mixed() {
     insta::assert_snapshot!(output, @r"
     ------- stderr -------
     Creating bookmark push-yqosqzytrlsw for revision yqosqzytrlsw
-    Error: Refusing to create new remote bookmark bookmark-1@origin
-    Hint: Run `jj bookmark track bookmark-1 --remote=origin` and try again.
+    Warning: Refusing to create new remote bookmark bookmark-2a@origin
+    Hint: Run `jj bookmark track bookmark-2a --remote=origin` and try again.
+    Warning: Refusing to create new remote bookmark bookmark-2b@origin
+    Hint: Run `jj bookmark track bookmark-2b --remote=origin` and try again.
+    Changes to push to origin:
+      Add bookmark push-yqosqzytrlsw to 0f8164cd580b
+      Add bookmark bookmark-1 to e76139e55e1e
     [EOF]
-    [exit status: 1]
     ");
 
     let output = work_dir.run_jj([
@@ -1411,13 +1416,69 @@ fn test_git_push_mixed() {
     insta::assert_snapshot!(output, @r"
     ------- stderr -------
     Warning: --allow-new is deprecated, track bookmarks manually or configure remotes.<name>.auto-track-bookmarks instead.
-    Creating bookmark push-yqosqzytrlsw for revision yqosqzytrlsw
+    Bookmark push-yqosqzytrlsw@origin already matches push-yqosqzytrlsw
+    Bookmark bookmark-1@origin already matches bookmark-1
     Changes to push to origin:
-      Add bookmark push-yqosqzytrlsw to 0f8164cd580b
-      Add bookmark bookmark-1 to e76139e55e1e
       Add bookmark bookmark-2a to 57d822f901bb
       Add bookmark bookmark-2b to 57d822f901bb
     [EOF]
+    ");
+}
+
+#[test]
+fn test_git_push_allow_new_bookmark_heuristics() {
+    let test_env = TestEnvironment::default();
+    set_up(&test_env);
+    let work_dir = test_env.work_dir("local");
+    test_env
+        .run_jj_in(".", ["git", "init", "--colocate", "upstream"])
+        .success();
+    work_dir
+        .run_jj([
+            "git",
+            "remote",
+            "add",
+            "upstream",
+            test_env
+                .work_dir("upstream")
+                .root()
+                .join(".git")
+                .to_str()
+                .unwrap(),
+        ])
+        .success();
+    work_dir.run_jj(["describe", "-m", "foo"]).success();
+    work_dir.write_file("file", "contents");
+
+    work_dir
+        .run_jj(["bookmark", "create", "untracked"])
+        .success();
+
+    let start_op = work_dir.current_operation_id();
+
+    // Pushing untracked bookmarks with --bookmark automatically trackes it.
+    let output = work_dir.run_jj(["git", "push", "--bookmark", "untracked"]);
+    insta::assert_snapshot!(output, @r"
+    ------- stderr -------
+    Changes to push to origin:
+      Add bookmark untracked to b9124726209b
+    [EOF]
+    ");
+
+    work_dir.run_jj(["op", "restore", &start_op]).success();
+    work_dir
+        .run_jj(["git", "push", "--bookmark=untracked", "--remote=upstream"])
+        .success();
+
+    // ...unless the bookmark is already tracked with a different remote, in
+    // which case the user may have simply forgotten to specify --remote.
+    let output = work_dir.run_jj(["git", "push", "--bookmark", "untracked"]);
+    insta::assert_snapshot!(output, @r"
+    ------- stderr -------
+    Error: Refusing to create new remote bookmark untracked@origin
+    Hint: Run `jj bookmark track untracked --remote=origin` and try again.
+    [EOF]
+    [exit status: 1]
     ");
 }
 
@@ -2256,6 +2317,87 @@ fn test_git_push_rejected_by_remote() {
         [exit status: 1]
         ");
     });
+}
+
+#[test]
+fn test_git_push_unmapped_refs() {
+    let test_env = TestEnvironment::default();
+    test_env
+        .run_jj_in(".", ["git", "init", "--colocate", "origin"])
+        .success();
+    test_env
+        .run_jj_in(".", ["git", "init", "--colocate", "local"])
+        .success();
+    let local_dir = test_env.work_dir("local");
+
+    // Set up remote with refspecs that map only specific branch
+    let mut data = local_dir.read_file(".git/config");
+    data.extend(indoc! {br#"
+        [remote "origin"]
+        	url = updated-later
+        	fetch = +refs/heads/dummy:refs/remotes/origin/dummy
+    "#});
+    local_dir.write_file(".git/config", data);
+    local_dir
+        .run_jj(["git", "remote", "set-url", "origin", "../origin"])
+        .success();
+
+    local_dir.run_jj(["commit", "-mcommit1"]).success();
+    local_dir
+        .run_jj(["bookmark", "set", "-r@-", "bookmark1"])
+        .success();
+    local_dir.run_jj(["commit", "-mcommit2"]).success();
+    local_dir
+        .run_jj(["bookmark", "set", "-r@-", "bookmark2"])
+        .success();
+    local_dir.run_jj(["bookmark", "track", "*"]).success();
+
+    // bookmark1 isn't mapped in Git, but can still be pushed
+    let output = local_dir.run_jj(["git", "push", "--bookmark=bookmark1"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Changes to push to origin:
+      Add bookmark bookmark1 to 5792bfac70a2
+    [EOF]
+    ");
+
+    // Remote bookmark for bookmark1 is created and exported by jj
+    insta::assert_snapshot!(get_bookmark_output(&local_dir), @"
+    bookmark1: rlvkpnrz 5792bfac (empty) commit1
+      @git: rlvkpnrz 5792bfac (empty) commit1
+      @origin: rlvkpnrz 5792bfac (empty) commit1
+    bookmark2: zsuskuln aa5df56a (empty) commit2
+      @git: zsuskuln aa5df56a (empty) commit2
+      @origin (not created yet)
+    [EOF]
+    ");
+
+    // Make export of bookmark2 fail by creating non-empty directory
+    local_dir.write_file(".git/refs/remotes/origin/bookmark2/dummy.lock", "");
+    let output = local_dir.run_jj(["git", "push", "--bookmark=bookmark2"]);
+    insta::assert_snapshot!(output, @r#"
+    ------- stderr -------
+    Changes to push to origin:
+      Add bookmark bookmark2 to aa5df56a071b
+    Warning: The following bookmarks couldn't be updated locally:
+      bookmark2@origin: Failed to set: The change for reference "refs/remotes/origin/bookmark2" could not be committed: Directory not empty
+    Error: Failed to push some bookmarks
+    [EOF]
+    [exit status: 1]
+    "#);
+
+    // Since export failed, bookmark2@origin isn't created. If it were created,
+    // this command would import "deletion" of bookmark2@origin as an external
+    // change, and abandon commit2.
+    insta::assert_snapshot!(get_bookmark_output(&local_dir), @"
+    bookmark1: rlvkpnrz 5792bfac (empty) commit1
+      @git: rlvkpnrz 5792bfac (empty) commit1
+      @origin: rlvkpnrz 5792bfac (empty) commit1
+    bookmark2: zsuskuln aa5df56a (empty) commit2
+      @git: zsuskuln aa5df56a (empty) commit2
+      @origin (not created yet)
+    [EOF]
+    ");
 }
 
 #[must_use]

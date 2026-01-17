@@ -4,10 +4,6 @@ use std::sync::mpsc;
 
 use crate::cdc::cdc_config::HASH_LENGTH;
 
-
-
-
-
 #[derive(Debug, thiserror::Error)]
 pub enum CdcError {
     #[error("Missing chunk data for hash {hash:?}")]
@@ -39,9 +35,6 @@ pub enum CdcError {
 
     #[error(transparent)]
     RedbStorage(#[from] redb::StorageError),
-
-
-
 }
 
 impl CdcError {
@@ -49,18 +42,11 @@ impl CdcError {
         Self::Git(source.into())
     }
 
-    pub fn from_channel_sender(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
+    pub fn from_channel_sender(
+        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Self {
         Self::ChannelSender(source.into())
     }
 }
 
-
 pub type CdcResult<T> = Result<T, CdcError>;
-
-
-
-
-
-
-
-

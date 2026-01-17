@@ -576,7 +576,7 @@ fn test_log_bad_short_prefixes() {
     // Error on bad config of short prefixes
     test_env.add_config(r#"revsets.short-prefixes = "!nval!d""#);
     let output = work_dir.run_jj(["status"]);
-    insta::assert_snapshot!(output, @r"
+    insta::assert_snapshot!(output, @"
     ------- stderr -------
     Config error: Invalid `revsets.short-prefixes`
     Caused by:  --> 1:1
@@ -584,7 +584,7 @@ fn test_log_bad_short_prefixes() {
     1 | !nval!d
       | ^---
       |
-      = expected <strict_identifier> or <expression>
+      = expected <expression>
     For help, see https://docs.jj-vcs.dev/latest/config/ or use `jj help -k config`.
     [EOF]
     [exit status: 1]
@@ -1191,9 +1191,9 @@ fn test_default_revset_per_repo() {
 
     work_dir.write_file("file1", "foo\n");
     work_dir.run_jj(["describe", "-m", "add a file"]).success();
-
-    // Set configuration to only show the root commit.
-    work_dir.write_file(".jj/repo/config.toml", r#"revsets.log = "root()""#);
+    work_dir
+        .run_jj(["config", "set", "--repo", "revsets.log", "root()"])
+        .success();
 
     // Log should only contain one line (for the root commit), and not show the
     // commit created above.

@@ -492,7 +492,10 @@ fn test_color_config() {
     ");
 
     // Test that per-repo config overrides the user config.
-    work_dir.write_file(".jj/repo/config.toml", r#"ui.color = "never""#);
+    work_dir
+        .run_jj(["config", "set", "--repo", "ui.color", "never"])
+        .success();
+
     let output = work_dir.run_jj(["log", "-T", "commit_id"]);
     insta::assert_snapshot!(output, @r"
     @  e8849ae12c709f2321908879bc724fdb2ab8a781
@@ -921,8 +924,8 @@ fn test_default_config() {
 
     let maskable_op_user = {
         let maskable_re = Regex::new(r"^[a-zA-Z0-9\-._]+$").unwrap();
-        let hostname = whoami::fallible::hostname().expect("hostname should be set");
-        let username = whoami::fallible::username().expect("username should be set");
+        let hostname = whoami::hostname().expect("hostname should be set");
+        let username = whoami::username().expect("username should be set");
         maskable_re.is_match(&hostname) && maskable_re.is_match(&username)
     };
 

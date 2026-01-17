@@ -39,7 +39,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::mpsc::Sender;
 use std::sync::mpsc::channel;
-use std::time::UNIX_EPOCH;
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use either::Either;
@@ -98,13 +98,14 @@ use crate::matchers::FilesMatcher;
 use crate::matchers::IntersectionMatcher;
 use crate::matchers::Matcher;
 use crate::matchers::PrefixMatcher;
+use crate::matchers::UnionMatcher;
 use crate::merge::Merge;
 use crate::merge::MergeBuilder;
 use crate::merge::MergedTreeValue;
 use crate::merge::SameChange;
 use crate::merged_tree::MergedTree;
-use crate::merged_tree::MergedTreeBuilder;
 use crate::merged_tree::TreeDiffEntry;
+use crate::merged_tree_builder::MergedTreeBuilder;
 use crate::object_id::ObjectId as _;
 use crate::op_store::OperationId;
 use crate::ref_name::WorkspaceName;
@@ -321,25 +322,29 @@ impl FileState {
         }
     }
 
-    fn for_file(exec_bit: ExecBit, size: u64, metadata: &Metadata) -> Self {
-        Self {
+    fn for_file(
+        exec_bit: ExecBit,
+        size: u64,
+        metadata: &Metadata,
+    ) -> Result<Self, MtimeOutOfRange> {
+        Ok(Self {
             file_type: FileType::Normal { exec_bit },
-            mtime: mtime_from_metadata(metadata),
+            mtime: mtime_from_metadata(metadata)?,
             size,
             materialized_conflict_data: None,
-        }
+        })
     }
 
-    fn for_symlink(metadata: &Metadata) -> Self {
+    fn for_symlink(metadata: &Metadata) -> Result<Self, MtimeOutOfRange> {
         // When using fscrypt, the reported size is not the content size. So if
         // we were to record the content size here (like we do for regular files), we
         // would end up thinking the file has changed every time we snapshot.
-        Self {
+        Ok(Self {
             file_type: FileType::Symlink,
-            mtime: mtime_from_metadata(metadata),
+            mtime: mtime_from_metadata(metadata)?,
             size: metadata.len(),
             materialized_conflict_data: None,
-        }
+        })
     }
 
     fn for_gitsubmodule() -> Self {
@@ -576,6 +581,7 @@ fn file_state_from_proto(proto: &crate::protos::local_working_copy::FileState) -
             exec_bit: ExecBit(true),
         },
         crate::protos::local_working_copy::FileType::Symlink => FileType::Symlink,
+        #[expect(deprecated)]
         crate::protos::local_working_copy::FileType::Conflict => FileType::Normal {
             exec_bit: ExecBit(false),
         },
@@ -883,22 +889,27 @@ fn reject_reserved_existing_file_identity(
     Ok(())
 }
 
-fn mtime_from_metadata(metadata: &Metadata) -> MillisSinceEpoch {
+#[derive(Debug, Error)]
+#[error("Out-of-range file modification time")]
+struct MtimeOutOfRange;
+
+fn mtime_from_metadata(metadata: &Metadata) -> Result<MillisSinceEpoch, MtimeOutOfRange> {
     let time = metadata
         .modified()
         .expect("File mtime not supported on this platform?");
-    let since_epoch = time
-        .duration_since(UNIX_EPOCH)
-        .expect("mtime before unix epoch");
+    system_time_to_millis(time).ok_or(MtimeOutOfRange)
+}
 
-    MillisSinceEpoch(
-        i64::try_from(since_epoch.as_millis())
-            .expect("mtime billions of years into the future or past"),
-    )
+fn system_time_to_millis(time: SystemTime) -> Option<MillisSinceEpoch> {
+    let millis = match time.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(duration) => i64::try_from(duration.as_millis()).ok()?,
+        Err(err) => -i64::try_from(err.duration().as_millis()).ok()?,
+    };
+    Some(MillisSinceEpoch(millis))
 }
 
 /// Create a new [`FileState`] from metadata.
-fn file_state(metadata: &Metadata) -> Option<FileState> {
+fn file_state(metadata: &Metadata) -> Result<Option<FileState>, MtimeOutOfRange> {
     let metadata_file_type = metadata.file_type();
     let file_type = if metadata_file_type.is_dir() {
         None
@@ -910,16 +921,16 @@ fn file_state(metadata: &Metadata) -> Option<FileState> {
     } else {
         None
     };
-    file_type.map(|file_type| {
-        let mtime = mtime_from_metadata(metadata);
-        let size = metadata.len();
-        FileState {
+    if let Some(file_type) = file_type {
+        Ok(Some(FileState {
             file_type,
-            mtime,
-            size,
+            mtime: mtime_from_metadata(metadata)?,
+            size: metadata.len(),
             materialized_conflict_data: None,
-        }
-    })
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 struct FsmonitorMatcher {
@@ -1081,8 +1092,10 @@ impl TreeState {
     }
 
     fn update_own_mtime(&mut self) {
-        if let Ok(metadata) = self.state_path.join("tree_state").symlink_metadata() {
-            self.own_mtime = mtime_from_metadata(&metadata);
+        if let Ok(metadata) = self.state_path.join("tree_state").symlink_metadata()
+            && let Ok(mtime) = mtime_from_metadata(&metadata)
+        {
+            self.own_mtime = mtime;
         } else {
             self.own_mtime = MillisSinceEpoch(0);
         }
@@ -1268,7 +1281,10 @@ impl TreeState {
             Some(fsmonitor_matcher) => fsmonitor_matcher.as_ref(),
         };
 
-        let matcher = IntersectionMatcher::new(sparse_matcher.as_ref(), fsmonitor_matcher);
+        let matcher = IntersectionMatcher::new(
+            sparse_matcher.as_ref(),
+            UnionMatcher::new(fsmonitor_matcher, force_tracking_matcher),
+        );
         if matcher.visit(RepoPath::root()).is_nothing() {
             // No need to load the current tree, set up channels, etc.
             self.watchman_clock = watchman_clock;
@@ -1612,7 +1628,9 @@ impl FileSnapshotter<'_> {
                     };
                     self.untracked_paths_tx.send((path, reason)).ok();
                     Ok(None)
-                } else if let Some(new_file_state) = file_state(&metadata) {
+                } else if let Some(new_file_state) = file_state(&metadata)
+                    .map_err(|err| snapshot_error_for_mtime_out_of_range(err, &entry.path()))?
+                {
                     self.process_present_file(
                         path,
                         &entry.path(),
@@ -1650,7 +1668,10 @@ impl FileSnapshotter<'_> {
                     });
                 }
             };
-            if let Some(new_file_state) = metadata.as_ref().and_then(file_state) {
+            if let Some(metadata) = &metadata
+                && let Some(new_file_state) = file_state(metadata)
+                    .map_err(|err| snapshot_error_for_mtime_out_of_range(err, &disk_path))?
+            {
                 self.process_present_file(
                     tracked_path.to_owned(),
                     &disk_path,
@@ -1908,32 +1929,36 @@ impl FileSnapshotter<'_> {
             message: format!("Failed to open file {}", disk_path.display()),
             err: err.into(),
         })?;
-        
-        if let Some(cdc_backend_wrapper) = self.store().backend_impl::<crate::cdc::backend_wrapper::CdcBackendWrapper>() && 
-                crate::cdc::cdc_manager::CdcMagager::is_binary_file(&mut file) {
-                // tracing::debug!("write file to cdc {:?}", disk_path.display());
-                // let start_time = std::time::Instant::now();
-                let pointer_content = cdc_backend_wrapper.write_file_to_cdc(file).await?;
-                // let end_time = std::time::Instant::now();
-                // eprintln!("after write file to store {:?}, time: {:?}", disk_path.display(), end_time.duration_since(start_time));
-                let result = Ok(self.store().write_file(path, &mut std::io::Cursor::new(pointer_content)).await?);
-                
-                result
+
+        if let Some(cdc_backend_wrapper) =
+            self.store()
+                .backend_impl::<crate::cdc::backend_wrapper::CdcBackendWrapper>()
+            && crate::cdc::cdc_manager::CdcMagager::is_binary_file(&mut file)
+        {
+            // tracing::debug!("write file to cdc {:?}", disk_path.display());
+            // let start_time = std::time::Instant::now();
+            let pointer_content = cdc_backend_wrapper.write_file_to_cdc(file).await?;
+            // let end_time = std::time::Instant::now();
+            // eprintln!("after write file to store {:?}, time: {:?}", disk_path.display(), end_time.duration_since(start_time));
+            let result = Ok(self
+                .store()
+                .write_file(path, &mut std::io::Cursor::new(pointer_content))
+                .await?);
+
+            result
         } else {
             let mut contents = self
-            .tree_state
-            .target_eol_strategy
-            .convert_eol_for_snapshot(BlockingAsyncReader::new(file))
-            .await
-            .map_err(|err| SnapshotError::Other {
-                message: "Failed to convert the EOL".to_string(),
-                err: err.into(),
-            })?;
+                .tree_state
+                .target_eol_strategy
+                .convert_eol_for_snapshot(BlockingAsyncReader::new(file))
+                .await
+                .map_err(|err| SnapshotError::Other {
+                    message: "Failed to convert the EOL".to_string(),
+                    err: err.into(),
+                })?;
 
             Ok(self.store().write_file(path, &mut contents).await?)
         }
-
-
     }
 
     async fn write_symlink_to_store(
@@ -1966,6 +1991,13 @@ impl FileSnapshotter<'_> {
     }
 }
 
+fn snapshot_error_for_mtime_out_of_range(err: MtimeOutOfRange, path: &Path) -> SnapshotError {
+    SnapshotError::Other {
+        message: format!("Failed to process file metadata {}", path.display()),
+        err: err.into(),
+    }
+}
+
 /// Functions to update local-disk files from the store.
 impl TreeState {
     async fn write_file(
@@ -1983,7 +2015,7 @@ impl TreeState {
                 message: format!("Failed to open file {} for writing", disk_path.display()),
                 err: err.into(),
             })?;
-        
+
         // 先进行 EOL 转换（如果需要）
         let mut contents = if apply_eol_conversion {
             self.target_eol_strategy
@@ -2000,10 +2032,15 @@ impl TreeState {
         // 尝试解析 CDC 指针
         use crate::cdc::pointer::{CdcPointer, TryParseResult};
 
-        let size = if let Some(cdc_wrapper) = self.store.backend_impl::<crate::cdc::backend_wrapper::CdcBackendWrapper>() {
+        let size = if let Some(cdc_wrapper) =
+            self.store
+                .backend_impl::<crate::cdc::backend_wrapper::CdcBackendWrapper>()
+        {
             match CdcPointer::try_parse(&mut contents).await {
                 Ok(TryParseResult::Parsed(pointer)) => {
-                    let size = cdc_wrapper.read_file_from_cdc(&pointer, &mut file).await
+                    let size = cdc_wrapper
+                        .read_file_from_cdc(&pointer, &mut file)
+                        .await
                         .map_err(|err| CheckoutError::Other {
                             message: format!("Failed to read file from CDC: {:?}", err),
                             err: err.into(),
@@ -2030,8 +2067,7 @@ impl TreeState {
                     });
                 }
             }
-        }
-        else {
+        } else {
             copy_async_to_sync(contents, &mut file)
                 .await
                 .map_err(|err| CheckoutError::Other {
@@ -2052,7 +2088,8 @@ impl TreeState {
         let metadata = file
             .metadata()
             .map_err(|err| checkout_error_for_stat_error(err, disk_path))?;
-        Ok(FileState::for_file(exec_bit, size as u64, &metadata))
+        FileState::for_file(exec_bit, size as u64, &metadata)
+            .map_err(|err| checkout_error_for_mtime_out_of_range(err, disk_path))
     }
 
     fn write_symlink(&self, disk_path: &Path, target: String) -> Result<FileState, CheckoutError> {
@@ -2089,7 +2126,8 @@ impl TreeState {
         let metadata = disk_path
             .symlink_metadata()
             .map_err(|err| checkout_error_for_stat_error(err, disk_path))?;
-        Ok(FileState::for_symlink(&metadata))
+        FileState::for_symlink(&metadata)
+            .map_err(|err| checkout_error_for_mtime_out_of_range(err, disk_path))
     }
 
     async fn write_conflict(
@@ -2125,7 +2163,8 @@ impl TreeState {
         let metadata = file
             .metadata()
             .map_err(|err| checkout_error_for_stat_error(err, disk_path))?;
-        Ok(FileState::for_file(exec_bit, size, &metadata))
+        FileState::for_file(exec_bit, size, &metadata)
+            .map_err(|err| checkout_error_for_mtime_out_of_range(err, disk_path))
     }
 
     pub fn check_out(&mut self, new_tree: &MergedTree) -> Result<CheckoutStats, CheckoutError> {
@@ -2316,14 +2355,16 @@ impl TreeState {
                     panic!("unexpected tree entry in diff at {path:?}");
                 }
                 MaterializedTreeValue::FileConflict(file) => {
-                    use crate::cdc::pointer::{CdcPointer, TryParseResult};
                     use crate::cdc::backend_wrapper::CdcBackendWrapper;
-                    if let Some(cdc_wrapper) = self.store.backend_impl::<CdcBackendWrapper>() 
-                      && file.contents.iter().any(|add| {
-                            CdcPointer::is_cdc_pointer(add)
-                        })
+                    use crate::cdc::pointer::{CdcPointer, TryParseResult};
+                    if let Some(cdc_wrapper) = self.store.backend_impl::<CdcBackendWrapper>()
+                        && file
+                            .contents
+                            .iter()
+                            .any(|add| CdcPointer::is_cdc_pointer(add))
                     {
-                        let base_name = disk_path.file_name()
+                        let base_name = disk_path
+                            .file_name()
                             .and_then(|n| n.to_str())
                             .unwrap_or("file");
                         let parent = disk_path.parent().unwrap();
@@ -2332,19 +2373,33 @@ impl TreeState {
                         // - add[0] 分支 1；add[1] 分支 2；add[2] 分支 3；
                         // - remove[0] 分支 1 和 分支 2 的共同祖先；remove[1] 分支 2 和 分支 3 的共同祖先；
                         for (i, add) in file.contents.adds().enumerate() {
-                            let version_path = parent.join(format! ("conflict-{}-{}", i+1, base_name));
-                            let mut file = File::create(&version_path).map_err(|err| CheckoutError::Other {
-                                message: format!("Failed to create file {}: {:?}", version_path.display(), err),
-                                err: err.into(),
+                            let version_path =
+                                parent.join(format!("conflict-{}-{}", i + 1, base_name));
+                            let mut file = File::create(&version_path).map_err(|err| {
+                                CheckoutError::Other {
+                                    message: format!(
+                                        "Failed to create file {}: {:?}",
+                                        version_path.display(),
+                                        err
+                                    ),
+                                    err: err.into(),
+                                }
                             })?;
                             let mut cursor = std::io::Cursor::new(add);
                             let pointer = CdcPointer::try_parse(&mut cursor).await.unwrap();
                             if let TryParseResult::Parsed(pointer) = pointer {
-                                let _size = cdc_wrapper.read_file_from_cdc(&pointer, &mut file).await?;
+                                let _size =
+                                    cdc_wrapper.read_file_from_cdc(&pointer, &mut file).await?;
                             } else {
                                 return Err(CheckoutError::Other {
-                                    message: format!("Failed to parse CDC pointer for {}", version_path.display()),
-                                    err: Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Failed to parse CDC pointer")),
+                                    message: format!(
+                                        "Failed to parse CDC pointer for {}",
+                                        version_path.display()
+                                    ),
+                                    err: Box::new(std::io::Error::new(
+                                        std::io::ErrorKind::Other,
+                                        "Failed to parse CDC pointer",
+                                    )),
                                 });
                             }
                         }
@@ -2352,7 +2407,7 @@ impl TreeState {
                         let mut base_conetents = HashMap::new();
                         for (i, remove) in file.contents.removes().enumerate() {
                             let base_contents = base_conetents.entry(remove).or_insert(Vec::new());
-                            base_contents.push(i+1);
+                            base_contents.push(i + 1);
                         }
 
                         for (base_contents, versions) in base_conetents {
@@ -2360,35 +2415,46 @@ impl TreeState {
                             let mut last = 0;
                             for i in versions {
                                 if i == last {
-                                    version.push_str(&format!("-{}", i+1));
+                                    version.push_str(&format!("-{}", i + 1));
+                                } else {
+                                    version.push_str(&format!("-{}-{}", i, i + 1));
                                 }
-                                else {
-                                    version.push_str(&format!("-{}-{}", i, i+1));
-                                }
-                                last = i+1;
+                                last = i + 1;
                             }
 
-
-                            let version_path = parent.join(format! ("base{}-{}", version, base_name));
-                            let mut file = File::create(&version_path).map_err(|err| CheckoutError::Other {
-                                message: format!("Failed to create file {}: {:?}", version_path.display(), err),
-                                err: err.into(),
+                            let version_path =
+                                parent.join(format!("base{}-{}", version, base_name));
+                            let mut file = File::create(&version_path).map_err(|err| {
+                                CheckoutError::Other {
+                                    message: format!(
+                                        "Failed to create file {}: {:?}",
+                                        version_path.display(),
+                                        err
+                                    ),
+                                    err: err.into(),
+                                }
                             })?;
                             let mut cursor = std::io::Cursor::new(base_contents);
                             let pointer = CdcPointer::try_parse(&mut cursor).await.unwrap();
                             if let TryParseResult::Parsed(pointer) = pointer {
-                                let _size = cdc_wrapper.read_file_from_cdc(&pointer, &mut file).await?;
+                                let _size =
+                                    cdc_wrapper.read_file_from_cdc(&pointer, &mut file).await?;
                             } else {
                                 return Err(CheckoutError::Other {
-                                    message: format!("Failed to parse CDC pointer for {}", version_path.display()),
-                                    err: Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Failed to parse CDC pointer")),
+                                    message: format!(
+                                        "Failed to parse CDC pointer for {}",
+                                        version_path.display()
+                                    ),
+                                    err: Box::new(std::io::Error::new(
+                                        std::io::ErrorKind::Other,
+                                        "Failed to parse CDC pointer",
+                                    )),
                                 });
                             }
                         }
 
                         FileState::placeholder()
-                    }
-                    else {
+                    } else {
                         let conflict_marker_len =
                             choose_materialized_conflict_marker_len(&file.contents);
                         let options = ConflictMaterializeOptions {
@@ -2401,8 +2467,11 @@ impl TreeState {
                             self.exec_policy,
                             get_prev_exec,
                         );
-                        let contents =
-                            materialize_merge_result_to_bytes(&file.contents, &file.labels, &options);
+                        let contents = materialize_merge_result_to_bytes(
+                            &file.contents,
+                            &file.labels,
+                            &options,
+                        );
                         let mut file_state =
                             self.write_conflict(&disk_path, &contents, exec_bit).await?;
                         file_state.materialized_conflict_data = Some(MaterializedConflictData {
@@ -2546,6 +2615,13 @@ impl TreeState {
 fn checkout_error_for_stat_error(err: io::Error, path: &Path) -> CheckoutError {
     CheckoutError::Other {
         message: format!("Failed to stat file {}", path.display()),
+        err: err.into(),
+    }
+}
+
+fn checkout_error_for_mtime_out_of_range(err: MtimeOutOfRange, path: &Path) -> CheckoutError {
+    CheckoutError::Other {
+        message: format!("Failed to process file metadata {}", path.display()),
         err: err.into(),
     }
 }
@@ -2949,6 +3025,8 @@ impl LockedLocalWorkingCopy {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use maplit::hashset;
 
     use super::*;
@@ -3135,5 +3213,33 @@ mod tests {
             prefixed_states.get_at(repo_path("b#"), repo_path_component("#")),
             None
         );
+    }
+
+    #[test]
+    fn test_system_time_to_millis() {
+        let epoch = SystemTime::UNIX_EPOCH;
+        assert_eq!(system_time_to_millis(epoch), Some(MillisSinceEpoch(0)));
+        if let Some(time) = epoch.checked_add(Duration::from_millis(1)) {
+            assert_eq!(system_time_to_millis(time), Some(MillisSinceEpoch(1)));
+        }
+        if let Some(time) = epoch.checked_sub(Duration::from_millis(1)) {
+            assert_eq!(system_time_to_millis(time), Some(MillisSinceEpoch(-1)));
+        }
+        if let Some(time) = epoch.checked_add(Duration::from_millis(i64::MAX as u64)) {
+            assert_eq!(
+                system_time_to_millis(time),
+                Some(MillisSinceEpoch(i64::MAX))
+            );
+        }
+        if let Some(time) = epoch.checked_sub(Duration::from_millis(i64::MAX as u64)) {
+            assert_eq!(
+                system_time_to_millis(time),
+                Some(MillisSinceEpoch(-i64::MAX))
+            );
+        }
+        if let Some(time) = epoch.checked_sub(Duration::from_millis(i64::MAX as u64 + 1)) {
+            // i64::MIN could be returned, but we don't care such old timestamp
+            assert_eq!(system_time_to_millis(time), None);
+        }
     }
 }

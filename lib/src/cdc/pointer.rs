@@ -3,7 +3,10 @@
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::cdc::{cdc_config::{MAGIC, MAGIC_LENGTH}, cdc_error::{CdcResult}};
+use crate::cdc::{
+    cdc_config::{MAGIC, MAGIC_LENGTH},
+    cdc_error::CdcResult,
+};
 
 pub type CdcPointerBytes = Vec<u8>;
 
@@ -22,9 +25,7 @@ pub enum TryParseResult {
 
 impl CdcPointer {
     pub fn new(manifest_hash: String) -> Self {
-        Self {
-            manifest_hash,
-        }
+        Self { manifest_hash }
     }
 
     pub fn hash(&self) -> &String {
@@ -40,13 +41,12 @@ impl CdcPointer {
     }
 
     /// 尝试解析 CDC 指针
-    /// 
+    ///
     /// # 返回值
     /// - `Ok(TryParseResult::Parsed(pointer))` - 成功解析出 CDC 指针
     /// - `Ok(TryParseResult::NotCdcPointer(bytes))` - 不是 CDC 指针，返回已读取的字节
     /// - `Err(e)` - 是 CDC 指针但解析失败，或读取错误
-    pub async fn try_parse<R: AsyncRead + Unpin>(reader: &mut R) -> CdcResult<TryParseResult> 
-    {
+    pub async fn try_parse<R: AsyncRead + Unpin>(reader: &mut R) -> CdcResult<TryParseResult> {
         // 尝试读取魔数
         let mut magic_buf = [0; MAGIC_LENGTH];
         let n = reader.read(&mut magic_buf).await?;
@@ -57,7 +57,7 @@ impl CdcPointer {
         // 魔数匹配，这应该是一个 CDC 指针
         let mut hash_bytes = Vec::new();
         reader.read_to_end(&mut hash_bytes).await?;
-        
+
         // 解析 hash
         let hash = String::from_utf8(hash_bytes).unwrap();
 
@@ -68,8 +68,7 @@ impl CdcPointer {
         if Self::is_cdc_pointer(bytes) {
             let hash = String::from_utf8(bytes[MAGIC_LENGTH..].to_vec()).unwrap();
             Some(Self::new(hash))
-        }
-        else {
+        } else {
             None
         }
     }
@@ -78,13 +77,4 @@ impl CdcPointer {
     pub fn is_cdc_pointer(bytes: &[u8]) -> bool {
         bytes.starts_with(MAGIC)
     }
-
-
-
-
-
-
-
-
-
 }

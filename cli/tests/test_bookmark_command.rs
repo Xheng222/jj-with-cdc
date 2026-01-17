@@ -1368,7 +1368,8 @@ fn test_bookmark_track_untrack() {
     bookmark: feature2@origin [updated] untracked
     bookmark: feature3@origin [new] tracked
     bookmark: main@origin     [updated] tracked
-    Abandoned 1 commits that are no longer reachable.
+    Abandoned 1 commits that are no longer reachable:
+      psynomvr 48ec79a4 commit 2
     [EOF]
     ");
     insta::assert_snapshot!(get_bookmark_output(&work_dir), @r"
@@ -2489,6 +2490,19 @@ fn test_bookmark_list_tracked() {
     [EOF]
     ");
 
+    let output = local_dir.run_jj(["bookmark", "list", "--tracked", "--remote=git"]);
+    insta::assert_snapshot!(output, @"
+    local-only: nmzmmopx 2a685e16 (empty) local-only
+      @git: nmzmmopx 2a685e16 (empty) local-only
+    remote-sync: rlvkpnrz 7a07dbee (empty) remote-sync
+      @git: rlvkpnrz 7a07dbee (empty) remote-sync
+    remote-unsync: nmzmmopx 2a685e16 (empty) local-only
+      @git: nmzmmopx 2a685e16 (empty) local-only
+    upstream-sync: lylxulpl 169ba7d9 (empty) upstream-sync
+      @git: lylxulpl 169ba7d9 (empty) upstream-sync
+    [EOF]
+    ");
+
     let output = local_dir.run_jj(["bookmark", "list", "--tracked", "remote-unsync"]);
     insta::assert_snapshot!(output, @r"
     remote-unsync: nmzmmopx 2a685e16 (empty) local-only
@@ -2745,6 +2759,69 @@ fn test_create_and_set_auto_track_bookmarks() {
     Created 1 bookmarks pointing to znkkpsqq 2e899fb8 mine/create* mine/set* | (empty) (no description set)
     [EOF]
     ");
+}
+
+#[test]
+fn test_create_and_set_auto_track_created_bookmarks() {
+    let test_env = TestEnvironment::default();
+    let root_dir = test_env.work_dir("");
+    root_dir
+        .run_jj(["git", "init", "--colocate", "origin"])
+        .success();
+
+    test_env.add_config(
+        "
+        [remotes.origin]
+        auto-track-created-bookmarks = 'mine/*'
+        auto-track-bookmarks = 'also-mine/*'
+        ",
+    );
+
+    root_dir.run_jj(["git", "init", "repo"]).success();
+    let repo_dir = test_env.work_dir("repo");
+    repo_dir
+        .run_jj(["git", "remote", "add", "origin", "../origin/.git"])
+        .success();
+
+    repo_dir
+        .run_jj([
+            "bookmark",
+            "create",
+            "mine/create",
+            "also-mine/create",
+            "not-mine/create",
+        ])
+        .success();
+    let output = repo_dir.run_jj(["bookmark", "list", "--all", "*/create"]);
+    insta::assert_snapshot!(output, @r"
+    also-mine/create: rlvkpnrz 7eb1c95e (empty) (no description set)
+      @origin (not created yet)
+    mine/create: rlvkpnrz 7eb1c95e (empty) (no description set)
+      @origin (not created yet)
+    not-mine/create: rlvkpnrz 7eb1c95e (empty) (no description set)
+    [EOF]
+    ");
+    repo_dir.run_jj(["commit", "--message", "create"]).success();
+
+    repo_dir
+        .run_jj([
+            "bookmark",
+            "set",
+            "mine/set",
+            "also-mine/set",
+            "not-mine/set",
+        ])
+        .success();
+    let output = repo_dir.run_jj(["bookmark", "list", "--all", "*/set"]);
+    insta::assert_snapshot!(output, @r"
+    also-mine/set: royxmykx 5fd666db (empty) (no description set)
+      @origin (not created yet)
+    mine/set: royxmykx 5fd666db (empty) (no description set)
+      @origin (not created yet)
+    not-mine/set: royxmykx 5fd666db (empty) (no description set)
+    [EOF]
+    ");
+    repo_dir.run_jj(["commit", "--message", "set"]).success();
 }
 
 #[test]

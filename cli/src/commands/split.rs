@@ -152,8 +152,7 @@ pub(crate) struct SplitArgs {
         long,
         short = 'A',
         visible_alias = "after",
-        conflicts_with = "onto",
-        conflicts_with = "parallel",
+        conflicts_with_all = ["onto", "parallel"],
         value_name = "REVSETS"
     )]
     #[arg(add = ArgValueCompleter::new(complete::revset_expression_all))]
@@ -169,8 +168,7 @@ pub(crate) struct SplitArgs {
         long,
         short = 'B',
         visible_alias = "before",
-        conflicts_with = "onto",
-        conflicts_with = "parallel",
+        conflicts_with_all = ["onto", "parallel"],
         value_name = "REVSETS"
     )]
     #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
@@ -556,6 +554,10 @@ The changes that are not selected will replace the original commit.
     let parent_tree = target_commit.parent_tree(tx.repo())?;
     let selected_tree = diff_selector.select(
         Diff::new(&parent_tree, &target_commit.tree()),
+        Diff::new(
+            target_commit.parents_conflict_label()?,
+            target_commit.conflict_label(),
+        ),
         matcher,
         format_instructions,
     )?;

@@ -30,7 +30,6 @@ use jj_lib::commit::CommitIteratorExt as _;
 use jj_lib::config::ConfigGetResultExt as _;
 use jj_lib::git;
 use jj_lib::git::GitBranchPushTargets;
-use jj_lib::git::GitPushStats;
 use jj_lib::git::GitSettings;
 use jj_lib::index::IndexResult;
 use jj_lib::op_store::RefTarget;
@@ -66,7 +65,7 @@ use crate::command_error::user_error_with_message;
 use crate::commands::git::get_single_remote;
 use crate::complete;
 use crate::formatter::Formatter;
-use crate::formatter::FormatterExt as _;
+use crate::git_util::print_push_stats;
 use crate::git_util::with_remote_git_callbacks;
 use crate::revset_util::parse_bookmark_name;
 use crate::revset_util::parse_union_name_patterns;
@@ -117,6 +116,9 @@ pub struct GitPushArgs {
 
     /// Push only this bookmark, or bookmarks matching a pattern (can be
     /// repeated)
+    ///
+    /// If a bookmark isn't tracking anything yet, the remote bookmark will be
+    /// tracked automatically.
     ///
     /// By default, the specified pattern matches bookmark names with glob
     /// syntax. You can also use other [string pattern syntax].
@@ -355,6 +357,10 @@ pub fn cmd_git_push(
                 continue;
             }
             let remote_symbol = name.to_remote_symbol(remote);
+            // Override allow_new if the bookmark is not tracked with any remote
+            // already. The user has specified --bookmark, so their intent which
+            // bookmarks to push is clear.
+            let allow_new = allow_new || !has_tracked_remote_bookmarks(tx.repo(), name);
             let allow_delete = true; // named explicitly, allow delete without --delete
             match classify_bookmark_update(remote_symbol, targets, allow_new, allow_delete) {
                 Ok(Some(update)) => bookmark_updates.push((name.to_owned(), update)),
@@ -467,10 +473,10 @@ pub fn cmd_git_push(
             cb,
         )
     })?;
-    print_stats(ui, &push_stats)?;
+    print_push_stats(ui, &push_stats)?;
     // TODO: On partial success, locally-created --change/--named bookmarks will
     // be committed. It's probably better to remove failed local bookmarks.
-    if push_stats.all_ok() || !push_stats.pushed.is_empty() {
+    if push_stats.all_ok() || push_stats.some_exported() {
         tx.finish(ui, tx_description)?;
     }
     if push_stats.all_ok() {
@@ -478,51 +484,6 @@ pub fn cmd_git_push(
     } else {
         Err(user_error("Failed to push some bookmarks"))
     }
-}
-
-fn print_stats(ui: &Ui, stats: &GitPushStats) -> io::Result<()> {
-    if !stats.rejected.is_empty() {
-        writeln!(
-            ui.warning_default(),
-            "The following references unexpectedly moved on the remote:"
-        )?;
-        let mut formatter = ui.stderr_formatter();
-        for (reference, reason) in &stats.rejected {
-            write!(formatter, "  ")?;
-            write!(formatter.labeled("git_ref"), "{}", reference.as_symbol())?;
-            if let Some(r) = reason {
-                write!(formatter, " (reason: {r})")?;
-            }
-            writeln!(formatter)?;
-        }
-        drop(formatter);
-        writeln!(
-            ui.hint_default(),
-            "Try fetching from the remote, then make the bookmark point to where you want it to \
-             be, and push again.",
-        )?;
-    }
-    if !stats.remote_rejected.is_empty() {
-        writeln!(
-            ui.warning_default(),
-            "The remote rejected the following updates:"
-        )?;
-        let mut formatter = ui.stderr_formatter();
-        for (reference, reason) in &stats.remote_rejected {
-            write!(formatter, "  ")?;
-            write!(formatter.labeled("git_ref"), "{}", reference.as_symbol())?;
-            if let Some(r) = reason {
-                write!(formatter, " (reason: {r})")?;
-            }
-            writeln!(formatter)?;
-        }
-        drop(formatter);
-        writeln!(
-            ui.hint_default(),
-            "Try checking if you have permission to push to all the bookmarks."
-        )?;
-    }
-    Ok(())
 }
 
 /// Validates that the commits that will be pushed are ready (have authorship

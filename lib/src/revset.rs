@@ -66,7 +66,6 @@ pub use crate::revset_parser::RevsetParseErrorKind;
 pub use crate::revset_parser::UnaryOp;
 pub use crate::revset_parser::expect_literal;
 pub use crate::revset_parser::parse_program;
-pub use crate::revset_parser::parse_program_with_modifier;
 pub use crate::revset_parser::parse_symbol;
 use crate::store::Store;
 use crate::str_util::StringExpression;
@@ -133,17 +132,6 @@ pub const GENERATION_RANGE_EMPTY: Range<u64> = 0..0;
 
 pub const PARENTS_RANGE_FULL: Range<u32> = 0..u32::MAX;
 
-/// Global flag applied to the entire expression.
-///
-/// The core revset engine doesn't use this value. It's up to caller to
-/// interpret it to change the evaluation behavior.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RevsetModifier {
-    /// Expression can be evaluated to multiple revisions even if a single
-    /// revision is expected by default.
-    All,
-}
-
 /// Symbol or function to be resolved to `CommitId`s.
 #[derive(Clone, Debug)]
 pub enum RevsetCommitRef {
@@ -200,7 +188,7 @@ pub enum RevsetFilterPredicate {
     /// Commits modifying the paths specified by the fileset.
     File(FilesetExpression),
     /// Commits containing diffs matching the `text` pattern within the `files`.
-    DiffContains {
+    DiffLines {
         text: StringExpression,
         files: FilesetExpression,
     },
@@ -311,6 +299,7 @@ pub enum RevsetExpression<St: ExpressionState> {
     Filter(RevsetFilterPredicate),
     /// Marker for subtree that should be intersected as filter.
     AsFilter(Arc<Self>),
+    Divergent,
     /// Resolves symbols and visibility at the specified operation.
     AtOperation {
         operation: St::Operation,
@@ -372,6 +361,10 @@ impl<St: ExpressionState> RevsetExpression<St> {
 
     pub fn filter(predicate: RevsetFilterPredicate) -> Arc<Self> {
         Arc::new(Self::Filter(predicate))
+    }
+
+    pub fn divergent() -> Arc<Self> {
+        Arc::new(Self::AsFilter(Arc::new(Self::Divergent)))
     }
 
     /// Find any empty commits.
@@ -684,6 +677,9 @@ impl ResolvedRevsetExpression {
 pub enum ResolvedPredicateExpression {
     /// Pure filter predicate.
     Filter(RevsetFilterPredicate),
+    Divergent {
+        visible_heads: Vec<CommitId>,
+    },
     /// Set expression to be evaluated as filter. This is typically a subtree
     /// node of `Union` with a pure filter predicate.
     Set(Box<ResolvedExpression>),
@@ -1078,7 +1074,14 @@ static BUILTIN_FUNCTION_MAP: LazyLock<HashMap<&str, RevsetFunction>> = LazyLock:
         let expr = expect_fileset_expression(diagnostics, arg, ctx.path_converter)?;
         Ok(RevsetExpression::filter(RevsetFilterPredicate::File(expr)))
     });
-    map.insert("diff_contains", |diagnostics, function, context| {
+    map.insert("diff_lines", |diagnostics, function, context| {
+        if function.name != "diff_lines" {
+            // TODO: Remove in jj 0.44+
+            diagnostics.add_warning(RevsetParseError::expression(
+                "diff_contains() is deprecated; use diff_lines() instead",
+                function.name_span,
+            ));
+        }
         let ([text_arg], [files_opt_arg]) = function.expect_arguments()?;
         let text = expect_string_expression(diagnostics, text_arg, context)?;
         let files = if let Some(files_arg) = files_opt_arg {
@@ -1094,13 +1097,18 @@ static BUILTIN_FUNCTION_MAP: LazyLock<HashMap<&str, RevsetFunction>> = LazyLock:
             // https://github.com/jj-vcs/jj/issues/2933#issuecomment-1925870731
             FilesetExpression::all()
         };
-        Ok(RevsetExpression::filter(
-            RevsetFilterPredicate::DiffContains { text, files },
-        ))
+        let predicate = RevsetFilterPredicate::DiffLines { text, files };
+        Ok(RevsetExpression::filter(predicate))
     });
+    // TODO: Remove diff_contains() in jj 0.44+
+    map.insert("diff_contains", map["diff_lines"]);
     map.insert("conflicts", |_diagnostics, function, _context| {
         function.expect_no_arguments()?;
         Ok(RevsetExpression::filter(RevsetFilterPredicate::HasConflict))
+    });
+    map.insert("divergent", |_diagnostics, function, _context| {
+        function.expect_no_arguments()?;
+        Ok(RevsetExpression::divergent())
     });
     map.insert("present", |diagnostics, function, context| {
         let [arg] = function.expect_exact_arguments()?;
@@ -1227,7 +1235,7 @@ fn expect_string_expression_inner(
                     .try_collect()?;
                 Ok(StringExpression::union_all(expressions))
             }
-            ExpressionKind::FunctionCall(_) | ExpressionKind::Modifier(_) => Err(expr_error()),
+            ExpressionKind::FunctionCall(_) => Err(expr_error()),
             ExpressionKind::AliasExpanded(..) => unreachable!(),
         }
     })
@@ -1361,13 +1369,6 @@ pub fn lower_expression(
         ExpressionKind::FunctionCall(function) => {
             lower_function_call(diagnostics, function, context)
         }
-        ExpressionKind::Modifier(modifier) => {
-            let name = modifier.name;
-            Err(RevsetParseError::expression(
-                format!("Modifier `{name}:` is not allowed in sub expression"),
-                modifier.name_span,
-            ))
-        }
         ExpressionKind::AliasExpanded(..) => unreachable!(),
     })
 }
@@ -1382,43 +1383,6 @@ pub fn parse(
         dsl_util::expand_aliases_with_locals(node, context.aliases_map, &context.local_variables)?;
     lower_expression(diagnostics, &node, &context.to_lowering_context())
         .map_err(|err| err.extend_function_candidates(context.aliases_map.function_names()))
-}
-
-pub fn parse_with_modifier(
-    diagnostics: &mut RevsetDiagnostics,
-    revset_str: &str,
-    context: &RevsetParseContext,
-) -> Result<(Arc<UserRevsetExpression>, Option<RevsetModifier>), RevsetParseError> {
-    let node = parse_program_with_modifier(revset_str)?;
-    let node =
-        dsl_util::expand_aliases_with_locals(node, context.aliases_map, &context.local_variables)?;
-    revset_parser::catch_aliases(diagnostics, &node, |diagnostics, node| match &node.kind {
-        ExpressionKind::Modifier(modifier) => {
-            let parsed_modifier = match modifier.name {
-                "all" => {
-                    diagnostics.add_warning(RevsetParseError::expression(
-                        "Multiple revisions are allowed by default; `all:` is planned for removal",
-                        modifier.name_span,
-                    ));
-                    RevsetModifier::All
-                }
-                _ => {
-                    return Err(RevsetParseError::with_span(
-                        RevsetParseErrorKind::NoSuchModifier(modifier.name.to_owned()),
-                        modifier.name_span,
-                    ));
-                }
-            };
-            let parsed_body =
-                lower_expression(diagnostics, &modifier.body, &context.to_lowering_context())?;
-            Ok((parsed_body, Some(parsed_modifier)))
-        }
-        _ => {
-            let parsed_body = lower_expression(diagnostics, node, &context.to_lowering_context())?;
-            Ok((parsed_body, None))
-        }
-    })
-    .map_err(|err| err.extend_function_candidates(context.aliases_map.function_names()))
 }
 
 /// Parses text into a string matcher expression.
@@ -1588,6 +1552,7 @@ fn try_transform_expression<St: ExpressionState, E>(
             RevsetExpression::AsFilter(candidates) => {
                 transform_rec(candidates, pre, post)?.map(RevsetExpression::AsFilter)
             }
+            RevsetExpression::Divergent => None,
             RevsetExpression::AtOperation {
                 operation,
                 candidates,
@@ -1838,6 +1803,7 @@ where
             let candidates = folder.fold_expression(candidates)?;
             RevsetExpression::AsFilter(candidates).into()
         }
+        RevsetExpression::Divergent => RevsetExpression::Divergent.into(),
         RevsetExpression::AtOperation {
             operation,
             candidates,
@@ -3187,6 +3153,12 @@ impl VisibilityResolutionContext<'_> {
                     predicate: self.resolve_predicate(expression),
                 }
             }
+            RevsetExpression::Divergent => ResolvedExpression::FilterWithin {
+                candidates: self.resolve_all().into(),
+                predicate: ResolvedPredicateExpression::Divergent {
+                    visible_heads: self.visible_heads.to_owned(),
+                },
+            },
             RevsetExpression::AtOperation { operation, .. } => match *operation {},
             RevsetExpression::WithinReference {
                 candidates,
@@ -3308,6 +3280,9 @@ impl VisibilityResolutionContext<'_> {
                 ResolvedPredicateExpression::Filter(predicate.clone())
             }
             RevsetExpression::AsFilter(candidates) => self.resolve_predicate(candidates),
+            RevsetExpression::Divergent => ResolvedPredicateExpression::Divergent {
+                visible_heads: self.visible_heads.to_owned(),
+            },
             RevsetExpression::AtOperation { operation, .. } => match *operation {},
             // Filters should be intersected with all() within the at-op repo.
             RevsetExpression::WithinReference { .. }
@@ -3621,33 +3596,6 @@ mod tests {
             workspace: Some(workspace_ctx),
         };
         super::parse(&mut RevsetDiagnostics::new(), revset_str, &context)
-    }
-
-    fn parse_with_modifier(
-        revset_str: &str,
-    ) -> Result<(Arc<UserRevsetExpression>, Option<RevsetModifier>), RevsetParseError> {
-        parse_with_aliases_and_modifier(revset_str, [] as [(&str, &str); 0])
-    }
-
-    fn parse_with_aliases_and_modifier(
-        revset_str: &str,
-        aliases: impl IntoIterator<Item = (impl AsRef<str>, impl Into<String>)>,
-    ) -> Result<(Arc<UserRevsetExpression>, Option<RevsetModifier>), RevsetParseError> {
-        let mut aliases_map = RevsetAliasesMap::new();
-        for (decl, defn) in aliases {
-            aliases_map.insert(decl, defn).unwrap();
-        }
-        let context = RevsetParseContext {
-            aliases_map: &aliases_map,
-            local_variables: HashMap::new(),
-            user_email: "test.user@example.com",
-            date_pattern_context: chrono::Utc::now().fixed_offset().into(),
-            default_ignored_remote: Some("ignored".as_ref()),
-            use_glob_by_default: true,
-            extensions: &RevsetExtensions::default(),
-            workspace: None,
-        };
-        super::parse_with_modifier(&mut RevsetDiagnostics::new(), revset_str, &context)
     }
 
     fn insta_settings() -> insta::Settings {
@@ -4003,25 +3951,6 @@ mod tests {
             CommitRef(Symbol("bar")),
         )
         "#);
-    }
-
-    #[test]
-    fn test_parse_revset_with_modifier() {
-        let settings = insta_settings();
-        let _guard = settings.bind_to_scope();
-
-        insta::assert_debug_snapshot!(
-            parse_with_modifier("all:foo").unwrap(), @r#"
-        (
-            CommitRef(Symbol("foo")),
-            Some(All),
-        )
-        "#);
-
-        // Top-level string pattern can't be parsed, which is an error anyway
-        insta::assert_debug_snapshot!(
-            parse_with_modifier(r#"exact:"foo""#).unwrap_err().kind(),
-            @r#"NoSuchModifier("exact")"#);
     }
 
     #[test]
@@ -4414,16 +4343,9 @@ mod tests {
         insta::assert_debug_snapshot!(
             parse_with_aliases("author_name(A)", [("A", "a")]).unwrap(),
             @r#"Filter(AuthorName(Pattern(Exact("a"))))"#);
-        // However, parentheses are required because top-level x:y is parsed as
-        // program modifier.
         insta::assert_debug_snapshot!(
-            parse_with_aliases("author_name(A)", [("A", "(exact:a)")]).unwrap(),
+            parse_with_aliases("author_name(A)", [("A", "exact:a")]).unwrap(),
             @r#"Filter(AuthorName(Pattern(Exact("a"))))"#);
-
-        // Sub-expression alias cannot be substituted to modifier expression.
-        insta::assert_debug_snapshot!(
-            parse_with_aliases_and_modifier("A-", [("A", "all:a")]).unwrap_err().kind(),
-            @r#"InAliasExpansion("A")"#);
     }
 
     #[test]
@@ -5290,6 +5212,12 @@ mod tests {
                 Filter(AuthorName(Pattern(Exact("foo")))),
                 Filter(CommitterName(Pattern(Exact("bar")))),
             ),
+        )
+        "#);
+        insta::assert_debug_snapshot!(optimize(parse("divergent() & foo").unwrap()), @r#"
+        Intersection(
+            CommitRef(Symbol("foo")),
+            AsFilter(Divergent),
         )
         "#);
 

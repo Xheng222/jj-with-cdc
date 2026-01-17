@@ -13,11 +13,13 @@ These are the config settings available to jj/Jujutsu.
 settings are located in [the user config files], which can be found with `jj
 config path --user`.
 
-- The repo settings. These can be edited with `jj config edit --repo` and are
-located in `.jj/repo/config.toml`.
+- The repo settings. These can be edited with `jj config edit --repo`, or found
+  with `jj config path --repo`. For security reasons, they are not located inside
+  the repo.
 
-- The workspace settings. These can be edited with `jj config edit --workspace`
-and are located in `.jj/workspace-config.toml` in the workspace root.
+- The workspace settings. These can be edited with `jj config edit --workspace`,
+  or found with `jj config path --workspace`. For security reasons, they are not
+  located inside the workspace.
 
 - Settings [specified in the command-line](#specifying-config-on-the-command-line).
 
@@ -436,9 +438,9 @@ page](conflicts.md#conflict-markers).
 
 You can configure the set of immutable commits via
 `revset-aliases."immutable_heads()"`. The default set of immutable heads is
-`builtin_immutable_heads()`, which in turn is defined as
-`present(trunk()) | tags() | untracked_remote_bookmarks()`. For example, to
-also consider the `release@origin` bookmark immutable:
+`builtin_immutable_heads()`, which in turn is defined as `trunk() | tags() |
+untracked_remote_bookmarks()`. For example, to also consider the
+`release@origin` bookmark immutable:
 
 ```toml
 [revset-aliases]
@@ -517,7 +519,7 @@ log = "main@origin.."
 ```
 
 The default value for `revsets.log` is
-`'present(@) | ancestors(immutable_heads().., 2) | present(trunk())'`.
+`'present(@) | ancestors(immutable_heads().., 2) | trunk()'`.
 
 ### Prioritize Revsets in the Log over @
 
@@ -1589,6 +1591,21 @@ reasons to restrict which bookmarks to track:
   [remotes.upstream]
   auto-track-bookmarks = "main"
   ```
+
+- If you're collaborating with people on the same remote, but your bookmark
+  names don't follow a pattern that allows a bookmark's "owner" to be identified
+  (e.g. `alice/*`), you can use `auto-track-created-bookmarks` instead:
+
+  ```toml
+  [remotes.origin]
+  auto-track-created-bookmarks = "*"
+  ```
+
+  This pattern will only apply to bookmarks you create with `jj bookmark create`
+  and `jj bookmark set`. The disadvantage of this option is the fact that you
+  will have to track your own bookmarks manually if you fetch them from the
+  remote. This may happen regularly if you use multiple computers to work on the
+  same project.
 
 - Lastly, you may be working on various projects with different conventions for
   bookmark names. In that case, it can be handy to apply different configuration
